@@ -1,7 +1,7 @@
 from __future__ import annotations
 import enum
 import re
-from typing import Iterable, Optional, Pattern, Union
+from typing import Callable, Iterable, Optional, Pattern, Union
 
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
@@ -27,7 +27,9 @@ class Style(enum.Enum):
     extra = enum.auto()
 
 
-_colornames: dict[Style, str] = {
+StyleLookup = Callable[[Style], QtGui.QColor]
+
+style_to_hcs_name: dict[Style, str] = {
     Style.plain: "ParmSyntaxPlainColor",
     Style.string: "ParmSyntaxStringColor",
     Style.var: "ParmSyntaxVarColor",
@@ -42,11 +44,34 @@ _colornames: dict[Style, str] = {
     Style.extra: "ParmSyntaxExtraColor",
 }
 
+default_colors: dict[Style, QtGui.QColor] = {
+    Style.plain: QtGui.QColor("#E0E2E4"),
+    Style.string: QtGui.QColor("#B6DBDB"),
+    Style.var: QtGui.QColor("#C892CA"),
+    Style.func: QtGui.QColor("#608EBE"),
+    Style.keyword: QtGui.QColor("#93C663"),
+    Style.quote: QtGui.QColor("#FFD6ED"),
+    Style.number: QtGui.QColor("#FCCA22"),
+    Style.ref: QtGui.QColor("#E8E2B8"),
+    Style.comment: QtGui.QColor("#A7A8A7"),
+    Style.error: QtGui.QColor("#E14640"),
+    Style.type: QtGui.QColor("#93A7BB"),
+    Style.extra: QtGui.QColor("#E36DD6"),
+}
 
-def styleColor(style: Style) -> QtGui.QColor:
+
+def nullStyleColor(style: Style) -> QtGui.QColor:
+    return QtGui.QColor(0, 0, 0)
+
+
+def defaultStyleColor(style: Style) -> QtGui.QColor:
+    return default_colors.get(style)
+
+
+def houdiniStyleColor(style: Style) -> QtGui.QColor:
     import hou
 
-    colorname = _colornames[style]
+    colorname = style_to_hcs_name[style]
     return hou.qt.toQColor(hou.ui.colorFromName(colorname))
 
 
@@ -111,3 +136,9 @@ def syntaxHighlighterConverter(
     if not isinstance(hiliter, QtGui.QSyntaxHighlighter):
         raise TypeError(hiliter)
     return hiliter
+
+
+class HighlighterBase(QtGui.QSyntaxHighlighter):
+    def __init__(self, parent: QtCore.QObject = None):
+        super().__init__(parent)
+        self.styleColor: StyleLookup = houdiniStyleColor

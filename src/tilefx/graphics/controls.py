@@ -1,5 +1,6 @@
 from __future__ import annotations
 import enum
+import math
 import pathlib
 from typing import Any, Iterable, Optional, Sequence, Union
 
@@ -571,7 +572,7 @@ class AbstractTextGraphic(core.RectangleGraphic):
 
     @settable()
     def setFontFamily(self, family: str) -> None:
-        font = self.font()
+        font = QtGui.QFont()
         font.setFamily(family)
         self.setFont(font)
 
@@ -686,6 +687,7 @@ class AbstractTextGraphic(core.RectangleGraphic):
 class StringGraphic(AbstractTextGraphic):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
+        self._compact = False
         self._text = ""
         self._insets: Optional[tuple[float]] = None
         self._text_size = QtCore.QSizeF()
@@ -739,6 +741,15 @@ class StringGraphic(AbstractTextGraphic):
         # self._updateContents()
         self.updateGeometry()
 
+    def isCompact(self) -> bool:
+        return self._compact
+    
+    @settable(argtype=bool)
+    def setCompact(self, compact: bool) -> None:
+        self.prepareGeometryChange()
+        self._compact = compact
+        self.updateGeometry()
+
     def _updateSize(self) -> None:
         fm = QtGui.QFontMetricsF(self.font())
         self._text_size.setWidth(fm.horizontalAdvance(self._text))
@@ -783,7 +794,7 @@ class StringGraphic(AbstractTextGraphic):
         constraint = constraint or QtCore.QSizeF(-1, -1)
         if which == Qt.PreferredSize:
             size = self.implicitSize()
-            if constraint.width() > size.width():
+            if constraint.width() > size.width() and not self._compact:
                 size.setWidth(constraint.width())
             return size
         return constraint
@@ -824,6 +835,7 @@ class TextGraphic(AbstractTextGraphic):
         self._links_clickable = False
         self._item = QtWidgets.QGraphicsTextItem(self)
         self._item.linkActivated.connect(self.linkClicked)
+        self._item.installEventFilter(self)
         self._updateInteractionFlags()
 
         doc = self._item.document()
@@ -835,6 +847,20 @@ class TextGraphic(AbstractTextGraphic):
 
         self.geometryChanged.connect(self._updateContents)
         # self._updateContents()
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent
+                    ) -> bool:
+        if watched == self._item and event.type() == event.FocusOut:
+            self.clearSelection()
+        return False
+
+    def clearSelection(self) -> None:
+        cur = self._item.textCursor()
+        cur.clearSelection()
+        self._item.setTextCursor(cur)
+
+    # def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+    #     print("KEY:", event.key())
 
     def changeEvent(self, event: QtCore.QEvent) -> None:
         super().changeEvent(event)
@@ -973,7 +999,7 @@ class TextGraphic(AbstractTextGraphic):
             flags |= Qt.LinksAccessibleByMouse
 
         self._item.setTextInteractionFlags(flags)
-        self._item.setFlag(self.ItemIsFocusable, False)
+        # self._item.setFlag(self.ItemIsFocusable, False)
 
     def linkClicked(self, url: str) -> None:
         print("LINK=", url)
@@ -1042,6 +1068,7 @@ class FormattedNumberGraphic(TextGraphic):
         self._formatter = formatting.NumberFormatter()
         self._number: int | float = 0.0
         self._min_width = 0.0
+        self._minus_width = 8.0
         self._digit_width = 8.0
         self._comma_width = 0.0
         self._comma_count = 0
@@ -1076,21 +1103,20 @@ class FormattedNumberGraphic(TextGraphic):
 
     @staticmethod
     def _commaCount(n: int) -> int:
-        # Would formatting the number and counting the comma chars actually be
-        # faster?
-        n = int(abs(n))
-        count = 0
-        while n >= 1000:
-            count += 1
-            n //= 1000
-        return count
+        # Math is hard
+        if not n:
+            return 0
+        return int(math.log10(abs(n)) / 3)
 
     def _updateFontSizes(self) -> None:
         # When the font changes, compute the fixed minimum width (the minus sign
         # and a decimal) and the digit width (using 0; this assumes
         # the font has tabular figures!!!)
-        fm = QtGui.QFontMetricsF(self.font())
-        self._min_width = fm.horizontalAdvance("\u2212.")
+        font = self.font()
+        font.setBold(True)
+        fm = QtGui.QFontMetricsF(font)
+        self._minus_width = fm.horizontalAdvance(formatting.NEGATIVE_CHAR)
+        self._min_width = self._minus_width + fm.horizontalAdvance(".")
         self._digit_width = fm.horizontalAdvance("0")
         self._comma_width = fm.horizontalAdvance(",")
 
@@ -1108,8 +1134,13 @@ class FormattedNumberGraphic(TextGraphic):
         avail_digits = int(avail / self._digit_width)
 
         fmt_num = fmtr.formatNumber(self._number, avail_digits=avail_digits)
+        indent = 0 if self._number < 0 else self._minus_width
         html = fmt_num.html()
+        if indent:
+            html = f"<p style='margin-left: {int(indent)}'>{html}</p>"
         self.setHtml(html)
+
+        self.document().setIndentWidth(indent)
 
         if fmt_num.type == formatting.NumberType.weird:
             over_color = ThemeColor.warning
@@ -2091,6 +2122,58 @@ class FancyButtonGraphic(ButtonGraphic):
         self._halo.setOpacity(self._halo_opacity)
 
 
+@graphictype("controls.simple_checkbox")
+class SimpleCheckboxGraphic(StringGraphic):
+    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
+        super().__init__(parent)
+        self._checkstate = Qt.Unchecked
+        self._change_expr: Optional[config.Expr] = None
+        self._click_expr: Optional[config.Expr] = None
+
+    def localEnv(self) -> dict[str, Any]:
+        return {
+            "state": self.checkState(),
+            "checked": self.isChecked()
+        }
+
+    def mousePressEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
+        event.accept()
+        self.toggle()
+        self._evaluateExpr(self._click_expr)
+
+    def checkState(self) -> Qt.CheckState:
+        return self._checkstate
+
+    def setCheckState(self, state: Qt.CheckState, *, animated=False) -> None:
+        if state != self._checkstate:
+            self._checkstate = state
+            self._evaluateExpr(self._change_expr)
+
+            bg = themes.ThemeColor.pressed if self.isChecked() else None
+            self.setFillColor(bg)
+
+    def isChecked(self) -> bool:
+        return self._checkstate == Qt.Checked
+
+    @settable()
+    def setChecked(self, checked: bool, *, animated=False) -> None:
+        self.setCheckState(Qt.Checked if checked else Qt.Unchecked,
+                           animated=animated)
+
+    def toggle(self, *, animated=False) -> None:
+        self.setChecked(not self.isChecked(), animated=animated)
+
+    @settable("on_click")
+    def setOnClickExpression(self, expr: Union[str, dict, config.PythonExpr]
+                             ) -> None:
+        self._click_expr = config.PythonExpr.fromData(expr)
+
+    @settable("on_state_change")
+    def setOnStateChangeExpression(self, expr: Union[str, dict, config.PythonExpr]
+                                   ) -> None:
+        self._change_expr = config.PythonExpr.fromData(expr)
+
+
 @graphictype("controls.checkbox")
 class CheckboxGraphic(ButtonGraphic):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
@@ -2733,6 +2816,7 @@ class ToolbarGraphic(core.RectangleGraphic):
         self._arrangement.setSpacing(10.0)
         self._arrangement.setJustification(layouts.Justify.start)
         self._default_size = QtCore.QSizeF()
+        self._text_size: Union[int, str] = "small"
 
         layout = layouts.ArrangementLayout(self._arrangement)
         self.setLayout(layout)
@@ -2768,6 +2852,10 @@ class ToolbarGraphic(core.RectangleGraphic):
         item.fadeIn()
         self._updateContents(animated=animated)
 
+    @settable(converter=converters.textSizeConverter)
+    def setTextSize(self, size: Union[int, str]) -> None:
+        self._text_size = size
+
     def addChild(self, item: QtWidgets.QGraphicsItem, index: int = None
                  ) -> None:
         super().addChild(item)
@@ -2783,7 +2871,7 @@ class ToolbarGraphic(core.RectangleGraphic):
                   font_size: int = None,
                   checkable=False, checked=False, draw_check=True,
                   width: float = None, height: float = None,
-                  min_width=28.0, min_height=28.0,
+                  min_width=20.0, min_height=20.0,
                   size: QtCore.QSize = None, enabled=True, visible=True,
                   name: str = None,
                   cls: type[ButtonGraphic] = ToolButtonGraphic
@@ -2796,8 +2884,8 @@ class ToolbarGraphic(core.RectangleGraphic):
         if glyph:
             button.setGlyph(glyph)
 
-        if font_size:
-            button.setFontSize(font_size)
+        button.setFontSize(font_size if font_size is not None
+                           else self._text_size)
 
         size = size or self._default_size
         if size and size.isValid():
@@ -2812,7 +2900,7 @@ class ToolbarGraphic(core.RectangleGraphic):
         if height is None or height >= min_height:
             button.setMinimumHeight(min_height)
 
-        button.setLabelMargins(QtCore.QMarginsF(8, 4, 8, 4))
+        button.setLabelMargins(QtCore.QMarginsF(4, 4, 4, 4))
         button.setCheckable(checkable)
         button.setChecked(checked)
         button.setEnabled(enabled)

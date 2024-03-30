@@ -6,7 +6,7 @@ from typing import Iterable, Optional, Tuple
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
 
-from .syntax import Style, keywordExpr, styleColor, number_expr
+from .syntax import HighlighterBase, Style, keywordExpr, number_expr
 
 
 USDA_KEYWORDS = ("prepend", "add", "append", "delete", "def", "over", "class",
@@ -191,7 +191,7 @@ def tokens(state: State, line: str, pos: int
             yield Style.plain, pos, state
 
 
-class UsdaHighlighter(QtGui.QSyntaxHighlighter):
+class UsdaHighlighter(HighlighterBase):
     def highlightBlock(self, text: str) -> None:
         stateint = self.previousBlockState()
         state: State = State(stateint) if stateint > -1 else State.normal
@@ -202,7 +202,7 @@ class UsdaHighlighter(QtGui.QSyntaxHighlighter):
                     raise Exception(
                         f"USDA lexer stuck at {state} {pos} {style}: {text!r}"
                     )
-                self.setFormat(pos, endpos, styleColor(style))
+                self.setFormat(pos, endpos, self.styleColor(style))
                 pos = endpos
 
         self.setCurrentBlockState(state.value)

@@ -4,7 +4,7 @@ import enum
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
 
-from .syntax import styleColor, Style
+from .syntax import HighlighterBase, Style
 
 
 class RegexState(enum.Enum):
@@ -13,7 +13,7 @@ class RegexState(enum.Enum):
     char_set = enum.auto()
 
 
-class RegexHighlighter(QtGui.QSyntaxHighlighter):
+class RegexHighlighter(HighlighterBase):
     def __init__(self, parent: QtWidgets.QWidget = None):
         super().__init__(parent)
         self._active = True
@@ -52,5 +52,5 @@ class RegexHighlighter(QtGui.QSyntaxHighlighter):
             elif char in "().+?*^$":
                 style = Style.func
 
-            self.setFormat(pos, pos + inc, styleColor(style))
+            self.setFormat(pos, pos + inc, self.styleColor(style))
             pos += inc

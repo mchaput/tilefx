@@ -5,8 +5,9 @@ from typing import TYPE_CHECKING, Optional, Union
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
 
-from .syntax import (bitstackPeek, bitstackPush, bitstackReplace, bitstackTrim,
-                     number_expr, unichar_expr, ws_expr, styleColor, Style)
+from .syntax import (HighlighterBase, bitstackPeek, bitstackPush,
+                     bitstackReplace, bitstackTrim, number_expr, unichar_expr,
+                     ws_expr, Style)
 
 if TYPE_CHECKING:
     from jsonpathfx import Kind
@@ -141,7 +142,7 @@ def json_token(stackbits: int, line: str, pos: int, in_string=False,
         return Style.plain, pos + 1, stackbits, False
 
 
-class JsonHighlighter(QtGui.QSyntaxHighlighter):
+class JsonHighlighter(HighlighterBase):
     def highlightBlock(self, text: str) -> None:
         stackbits = self.previousBlockState()
         if stackbits == -1:
@@ -156,13 +157,13 @@ class JsonHighlighter(QtGui.QSyntaxHighlighter):
                 json_token(stackbits, text, pos, in_string)
             if endpos <= pos:
                 raise Exception(f"JSON lexer stuck at {pos}: {text!r}")
-            self.setFormat(pos, endpos, styleColor(style))
+            self.setFormat(pos, endpos, self.styleColor(style))
             pos = endpos
 
         self.setCurrentBlockState(int(stackbits))
 
 
-class JsonpathHighlighter(QtGui.QSyntaxHighlighter):
+class JsonpathHighlighter(HighlighterBase):
     """
     Highlighter for jsonpathfx syntax.
     """
@@ -214,8 +215,8 @@ class JsonpathHighlighter(QtGui.QSyntaxHighlighter):
         for token in tokens:
             pos = token.pos
             if prev_style:
-                self.setFormat(prev_pos, pos, styleColor(prev_style))
+                self.setFormat(prev_pos, pos, self.styleColor(prev_style))
             prev_pos = pos
             prev_style = kind_map.get(token.kind)
         if prev_style is not None:
-            self.setFormat(prev_pos, len(text), styleColor(prev_style))
+            self.setFormat(prev_pos, len(text), self.styleColor(prev_style))

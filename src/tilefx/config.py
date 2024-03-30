@@ -18,7 +18,7 @@ from . import styling
 if TYPE_CHECKING:
     import hou
     from . import models
-    from .graphics import core
+    from .graphics import core, views
 
 
 # Type aliases
@@ -275,6 +275,8 @@ class Expr:
         self.value_map = value_map
         self.default = default
         self.text_transform: Optional[Callable[[str], str]] = None
+        if isinstance(depends, str):
+            depends = (depends,)
         self.depends = depends
 
         if callable(text_transform):
@@ -298,6 +300,7 @@ class Expr:
                      ) -> Iterable[models.RowData]:
         from .models import RowData
         for value in self.evaluate(data, env):
+            env = env.copy()
             yield RowData(value, env)
 
     def set(self, value: Any) -> None:
@@ -382,11 +385,9 @@ class JsonPathExpr(Expr):
         try:
             for match in self.path.find(data, env):
                 bindings = match.bindings()
+                row_env = env.copy()
                 if bindings:
-                    row_env = env.copy()
                     row_env.update(bindings)
-                else:
-                    row_env = env
                 yield RowData(match.value, row_env)
         except Exception as e:
             raise Exception(f"Error while finding with {self.path}: {e}")
@@ -594,17 +595,18 @@ class Updater:
                 deps[dep_name].add(name)
         return deps
 
-    def updateDependencies(self, obj: QtCore.QObject, env: dict[str, Any],
-                           name: str) -> None:
+    def updateDependencies(self, obj: QtCore.QObject, data: dict[str, Any],
+                           env: dict[str, Any], name: str) -> dict[str, Any]:
         env = env.copy()
         for var_name in self.var_depends.get(name, ()):
             expr = self.var_map[var_name]
-            env[var_name] = expr.evaluate(None, env)
+            env[var_name] = expr.evaluate(data, env)
 
         for prop_name in self.prop_depends.get(name, ()):
             expr = self.prop_map[prop_name]
-            value = expr.evaluate(None, env)
+            value = expr.evaluate(data, env)
             setSettable(obj, prop_name, value)
+        return env
 
     def setVariableData(self, var_dict: dict[str, Any],
                         controller: DataController) -> None:
@@ -702,8 +704,6 @@ class DataController(AbstractController):
         self._template_updaters: dict[tuple[int, str], Updater] = {}
         self._externals: dict[str, ExternalExpr] = {}
         self._color_policies: dict[str, styling.ColorPolicy] = {}
-        self._depends: defaultdict[str, list[tuple[QtCore.QObject, Updater]]] \
-            = defaultdict(list)
 
     def globalEnv(self) -> dict[str, Any]:
         env = super().globalEnv()
@@ -713,7 +713,6 @@ class DataController(AbstractController):
     def clear(self) -> None:
         self._updaters.clear()
         self._template_updaters.clear()
-        self._depends.clear()
         self.models.clear()
         self.models.update(self.persistent_models)
 
@@ -744,19 +743,10 @@ class DataController(AbstractController):
         self.models[name] = model
         return model
 
-    def _dataProxyFor(self, obj: QtCore.QObject) -> QtCore.QObject:
-        from .graphics import core
-
-        checked: list[QtWidgets.QGraphicsItem] = [obj]
-        while isinstance(checked[-1], core.Graphic):
-            dp = checked[-1].dataProxy()
-            if not dp:
-                break
-            if dp in checked:
-                dp_refs = ', '.join(repr(o) for o in checked)
-                raise Exception(f"Circular dataProxy refs: {dp_refs}: {dp!r}")
-            checked.append(dp)
-        return checked[-1]
+    @staticmethod
+    def _dataProxyFor(obj: QtCore.QObject) -> QtCore.QObject:
+        from .graphics.core import dataProxyFor
+        return dataProxyFor(obj)
 
     def _setObjectModelData(self, data_obj: QtCore.QObject, model_data: Any
                             ) -> None:
@@ -814,10 +804,6 @@ class DataController(AbstractController):
 
         if updater.hasValues():
             self._updaters[orig_obj_id] = updater
-            # TODO: for now we just update the entire object when any dependency
-            #   changes
-            for name in set(updater.var_depends) | set(updater.prop_depends):
-                self._depends[name].append((obj, updater))
 
         # Look for templates
         obj_type = type(data_obj)
@@ -836,18 +822,66 @@ class DataController(AbstractController):
         #     for lt in listen_to:
         #         self._subscribers[lt].append(obj)
 
-    def updateDependencies(self, name: str, env: dict[str, JsonValue] = None
-                           ) -> None:
+    def updateDependencies(self, name: str, data: dict[str, Any],
+                           env: dict[str, JsonValue] = None) -> None:
         env = env if env is not None else self.globalEnv()
-        for obj, updater in self._depends[name]:
-            updater.updateDependencies(obj, env, name)
+        root = self._root
+        if not root:
+            raise Exception("No root item set")
+        self.updateObjectDependencies(root, data, env, name)
 
-            if isinstance(obj, QtWidgets.QGraphicsItem):
-                obj.updateGeometry()
-                obj.update()
+    def updateObjectDependencies(self, obj: QtCore.QObject, data: dict[str, Any],
+                                 env: dict[str, JsonValue], name: str) -> None:
+        from .graphics import core, views
 
-    def updateFromData(self, data: dict[str, Any], env: dict[str, Any] = None
-                       ) -> None:
+        env = env if env is not None else self.globalEnv()
+        updater = self._updaters.get(id(obj))
+        if updater and name in updater.prop_depends:
+            extra_env = {}
+            if isinstance(obj, core.Graphic):
+                data_obj = self._dataProxyFor(obj)
+                extra_env["model"] = data_obj.model()
+            env = updater.updateDependencies(obj, data, env, name)
+
+        if isinstance(obj, core.Graphic):
+            data_obj = self._dataProxyFor(obj)
+            if isinstance(data_obj, views.DataLayoutGraphic):
+                for key in data_obj.templateKeys():
+                    upd_key = (id(data_obj), key)
+                    item_updater = self._template_updaters.get(upd_key)
+                    if item_updater and name in item_updater.prop_depends:
+                        self._updateItemDependencies(data_obj, item_updater,
+                                                     env, name)
+
+            for child in obj.updateableChildren():
+                self.updateObjectDependencies(child, data, env, name)
+
+        if isinstance(obj, QtWidgets.QGraphicsItem):
+            obj.updateGeometry()
+            obj.update()
+
+    def _updateItemDependencies(self, obj: views.DataLayoutGraphic,
+                                updater: Updater, env: dict[str, Any],
+                                dep_name: str) -> None:
+        from .graphics import views
+        from .models import ModelRowAdapter
+
+        model: QtCore.QAbstractItemModel = obj.model()
+        mra = ModelRowAdapter(model, 0)
+        env = env.copy()
+        env.update({
+            "model": model,
+            "row_num": 0,
+            "item":  mra
+        })
+        for graphic in obj.liveItems():
+            row_num = graphic.data(views.ITEM_ROW_NUM)
+            env["row_num"] = row_num
+            mra.row = row_num
+            updater.updateDependencies(graphic, None, env, dep_name)
+
+    def updateFromData(self, data: dict[str, Any], env: dict[str, Any] = None,
+                       clear_models=False) -> None:
         from . import models
 
         root = self._root
@@ -855,20 +889,32 @@ class DataController(AbstractController):
             raise Exception("No root item set")
 
         env = env if env is not None else self.globalEnv()
+        # t = time.perf_counter()
         for model_name, model in self.models.items():
+            # tt = time.perf_counter()
             # TODO: update the model using the model API?
             if isinstance(model, QtCore.QSortFilterProxyModel):
                 model = model.sourceModel()
             if not isinstance(model, models.BaseDataModel):
                 raise TypeError(f"Can't update {model} directly")
+            if clear_models:
+                model.clear()
             model.updateFromData(data, env)
+            # print(f"Update model {model.objectName()}: {model.rowCount()} "
+            #       f"{time.perf_counter() - tt:0.04f}")
+            # if isinstance(model, models.DataModel):
+            #     print("rows=", model._rows)
+        # print(f"Update models: {time.perf_counter() - t:0.04f}")
 
+        # t = time.perf_counter()
         self.updateObjectFromData(root, data, env)
+        # print(f"Update graphics: {time.perf_counter() - t:0.04f}")
 
     def updateObjectFromData(self, obj: QtCore.QObject, data: dict[str, Any],
                              env: dict[str, JsonValue] = None) -> None:
         from .graphics import core
 
+        # t = time.perf_counter()
         env = env if env is not None else self.globalEnv()
         updater = self._updaters.get(id(obj))
         if updater:
@@ -877,6 +923,7 @@ class DataController(AbstractController):
                 data_obj = self._dataProxyFor(obj)
                 extra_env["model"] = data_obj.model()
             env = updater.updateObject(obj, data, env, extra_env)
+        # print(f"--Update {obj.objectName()} {time.perf_counter() - t:0.04f}")
 
         for child in obj.updateableChildren():
             self.updateObjectFromData(child, data, env)
@@ -885,9 +932,9 @@ class DataController(AbstractController):
             obj.updateGeometry()
             obj.update()
 
-    def updateTemplateItemFromEnv(self, key: str, extra_env: dict[str, Any],
-                                  obj: QtCore.QObject, item: QtCore.QObject
-                                  ) -> None:
+    def updateTemplateItemFromEnv(self, obj: QtCore.QObject, key: str,
+                                  item: QtCore.QObject,
+                                  extra_env: dict[str, Any]) -> None:
         if not obj:
             raise ValueError("No object")
         if not item:
@@ -911,7 +958,7 @@ class DataController(AbstractController):
             "row_num": row,
             "item":  ModelRowAdapter(model, row)
         }
-        self.updateTemplateItemFromEnv(key, env, obj, item)
+        self.updateTemplateItemFromEnv(obj, key, item, env)
 
 
 def updateSettables(obj: QtCore.QObject, updates: dict[str, Any]) -> None:

@@ -6,7 +6,7 @@ from typing import Iterable, Optional, Tuple
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
 
-from .syntax import Style, number_expr, styleColor
+from .syntax import HighlighterBase, Style, number_expr
 
 
 class XmlState(enum.Enum):
@@ -32,20 +32,23 @@ def _badCloseTag(line: str, pos: int, state: XmlState, in_pi: bool) -> bool:
     return False
 
 
-class XmlHighlighter(QtGui.QSyntaxHighlighter):
+class XmlHighlighter(HighlighterBase):
     def highlightBlock(self, line: str) -> None:
+        if not line:
+            return
+
         state_int = self.previousBlockState()
         in_pi = bool(state_int & 0b10000)
-        if state_int < 0:
+        if state_int <= 0:
             state = XmlState.text
         else:
             state = XmlState(state_int & 0b1111)
         pos = 0
         while pos < len(line):
             start = pos
+            char = line[pos]
             pos += 1
             style = Style.plain
-            char = line[pos]
             if _badCloseTag(line, start, state, in_pi):
                 style = Style.error if in_pi else Style.type
                 state = XmlState.text
@@ -160,7 +163,7 @@ class XmlHighlighter(QtGui.QSyntaxHighlighter):
                     while pos < len(line) and line[pos] not in cs:
                         pos += 1
 
-            self.setFormat(start, pos, styleColor(style))
+            self.setFormat(start, pos, self.styleColor(style))
             if in_pi and state != XmlState.start_tag:
                 in_pi = False
 

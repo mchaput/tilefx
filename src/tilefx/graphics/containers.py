@@ -16,7 +16,13 @@ class ContainerGraphic(core.AreaGraphic):
         super().__init__(parent)
         self._items: list[Graphic] = []
 
-        self.geometryChanged.connect(self._repositionContents)
+    # def setGeometry(self, rect: QtCore.QRectF) -> None:
+    #     super().setGeometry(rect)
+    #     self._repositionContents()
+
+    def resizeEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
+        super().resizeEvent(event)
+        self._repositionContents()
 
     def addChild(self, item: QtWidgets.QGraphicsItem):
         super().addChild(item)
@@ -113,9 +119,18 @@ class FlipContainerGraphic(SwitchingContainerGraphic):
         self._flipx = 0.0
         self._flipy = 90.0
         self._flipping = False
+        self._stretch_contents = False
 
         self._anim_group = QtCore.QSequentialAnimationGroup(self)
         self._anim_group.finished.connect(self._reset)
+
+    def isStretchingContents(self) -> bool:
+        return self._stretch_contents
+
+    @settable(argtype=bool)
+    def setStretchContents(self, stretch: bool) -> None:
+        self._stretch_contents = stretch
+        self._repositionContents()
 
     def addChild(self, item: QtWidgets.QGraphicsItem) -> None:
         first = not self.count()
@@ -129,6 +144,8 @@ class FlipContainerGraphic(SwitchingContainerGraphic):
         ctr = rect.center()
         for item in self._items:
             item.setPos(ctr)
+            if self.isStretchingContents():
+                item.resize(rect.size())
             item.setXYRotation(QtCore.QPointF())
 
     def mousePressEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:

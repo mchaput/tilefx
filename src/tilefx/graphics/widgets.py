@@ -10,11 +10,17 @@ from . import core
 
 
 class ZoomingView(QtWidgets.QGraphicsView):
+    zoomChanged = QtCore.Signal()
+
     def __init__(self, parent: QtWidgets.QWidget = None):
         super().__init__(parent)
+        self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.setTransformationAnchor(self.NoAnchor)
+        self.setFrameStyle(self.NoFrame)
+
         self._zoomlevels = [0.75, 0.8, 0.9, 1.0, 1.2, 1.4, 1.7, 2.0]
         self._global_scale = 1.0
-        self._zoomscale = 1.0
+        self._zoom_scale = 1.0
 
         self.zoomOutAction = QtWidgets.QAction("Zoom Out", self)
         self.zoomOutAction.setShortcut(QtGui.QKeySequence("Ctrl+-"))
@@ -37,25 +43,29 @@ class ZoomingView(QtWidgets.QGraphicsView):
     def setGlobalScale(self, scale: float) -> None:
         self._global_scale = scale
         # Re-set zoom level to the current value to apply new global scale
-        self.setZoomLevel(self._zoomscale)
+        self.setZoomLevel(self._zoom_scale)
 
     def zoomLevel(self) -> float:
-        return self._zoomscale
+        return self._zoom_scale
 
     def setZoomLevel(self, scale: float):
-        self._zoomscale = scale
+        self._zoom_scale = scale
         scale = scale * self._global_scale
         self.setTransform(QtGui.QTransform.fromScale(scale, scale))
         self.fitToContents()
+        self.zoomChanged.emit()
 
     def zoomOut(self):
         self.setZoomLevel(self.nextLowerZoomLevel())
+        self.fitToContents()
 
     def zoomIn(self):
         self.setZoomLevel(self.nextHigherZoomLevel())
+        self.fitToContents()
 
     def unzoom(self):
         self.setZoomLevel(1.0)
+        self.fitToContents()
 
     def nextLowerZoomLevel(self) -> float:
         z = self.zoomLevel()
@@ -78,8 +88,6 @@ class ZoomingView(QtWidgets.QGraphicsView):
 class GraphicView(ZoomingView):
     def __init__(self, parent: QtWidgets.QWidget = None):
         super().__init__(parent)
-        self.setFrameStyle(self.NoFrame)
-
         self._template_path: Optional[pathlib.Path] = None
 
         self.setBackgroundRole(QtGui.QPalette.Window)
@@ -109,15 +117,12 @@ class GraphicView(ZoomingView):
         self.fitToContents()
 
     def viewRect(self) -> QtCore.QRectF:
-        rect = self.rect()
-        return QtCore.QRectF(rect)
-        # vsb = self.verticalScrollBar()
-        # if vsb.isVisible():
-        #     sbw = self.verticalScrollBar().width()
-        # else:
-        #     sbw = 0
-        # vw = (rect.width() - sbw) / (self.zoomLevel() * self.globalScale())
-        # return QtCore.QRectF(0, 0, vw, rect.height())
+        rect = QtCore.QRectF(self.rect())
+        factor = self._zoom_scale * self._global_scale
+        vw = rect.width() / factor
+        vh = rect.height() / factor
+        rect.setSize(QtCore.QSizeF(vw, vh))
+        return rect
 
     def fitToContents(self):
         scene = self.scene()
@@ -127,16 +132,12 @@ class GraphicView(ZoomingView):
         view_rect = self.viewRect()
         if isinstance(scene, core.GraphicScene):
             root = scene.rootGraphic()
-        else:
-            root = None
+            if root and root.isVisible():
+                # constraint = QtCore.QSizeF(vw, -1)
+                # size = root.effectiveSizeHint(Qt.PreferredSize, constraint)
+                root.setGeometry(view_rect)
 
         self.scene().setSceneRect(view_rect)
-        if root and root.isVisible():
-            constraint = QtCore.QSizeF(view_rect.width(), -1)
-            # size = root.effectiveSizeHint(Qt.PreferredSize, constraint)
-            # size = size.boundedTo(view_rect.size())
-            root_rect = QtCore.QRectF(QtCore.QPointF(0, 0), view_rect.size())
-            root.setGeometry(root_rect)
 
     def scrollToTop(self) -> None:
         from .views import ScrollGraphic
@@ -158,7 +159,10 @@ class GraphicView(ZoomingView):
             size = root.contentsSizeHint(Qt.PreferredSize, constraint)
         else:
             size = root.sizeHint(Qt.PreferredSize, constraint)
-        return size.height()
+
+        # Compensate for the scaling factor
+        factor = self._zoom_scale * self._global_scale
+        return size.height() * factor
 
     def rootGraphic(self) -> Optional[core.Graphic]:
         scene = self.scene()

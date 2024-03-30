@@ -6,10 +6,10 @@ from typing import Iterable, Optional, Pattern, Union
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
 
-from .syntax import keywordExpr, ws_expr, styleColor, Style
+from .syntax import HighlighterBase, keywordExpr, ws_expr, Style
 
 
-class ExpressionHighlighter(QtGui.QSyntaxHighlighter):
+class ExpressionHighlighter(HighlighterBase):
     func_expr = re.compile(r"(^|(?<=\W))[A-Za-z_][A-Za-z_0-9]*(?=[(])")
     var_expr = re.compile("[@$]([A-Za-z_][A-Za-z_0-9]*)?")
 
@@ -48,7 +48,7 @@ class ExpressionHighlighter(QtGui.QSyntaxHighlighter):
             else:
                 pos += 1
 
-            self.setFormat(prev, pos, styleColor(style))
+            self.setFormat(prev, pos, self.styleColor(style))
 
 
 VEX_KEYWORDS = ("if", "else", "for", "while", "break", "continue",
@@ -181,7 +181,7 @@ def vex_token(state: VexState, line: str, pos=0) -> tuple[Style, int, VexState]:
     return Style.plain, pos + 1, state
 
 
-class VexHighlighter(QtGui.QSyntaxHighlighter):
+class VexHighlighter(HighlighterBase):
     def highlightBlock(self, text: str) -> None:
         stateint = self.previousBlockState()
         state: VexState = (VexState(stateint) if stateint > -1
@@ -191,7 +191,7 @@ class VexHighlighter(QtGui.QSyntaxHighlighter):
             style, endpos, state = vex_token(state, text, pos)
             if endpos <= pos:
                 raise Exception("VEX lexer did not move forward")
-            color = styleColor(style)
+            color = self.styleColor(style)
             self.setFormat(pos, endpos, color)
             pos = endpos
 

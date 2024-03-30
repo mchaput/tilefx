@@ -140,6 +140,19 @@ def poofAnim(item: QtWidgets.QGraphicsItem,
     return anim_group
 
 
+def dataProxyFor(obj: QtCore.QObject) -> QtCore.QObject:
+    checked: list[QtWidgets.QGraphicsItem] = [obj]
+    while isinstance(checked[-1], Graphic):
+        dp = checked[-1].dataProxy()
+        if not dp:
+            break
+        if dp in checked:
+            dp_refs = ', '.join(repr(o) for o in checked)
+            raise Exception(f"Circular dataProxy refs: {dp_refs}: {dp!r}")
+        checked.append(dp)
+    return checked[-1]
+
+
 class GraphicScene(QtWidgets.QGraphicsScene):
     rootChanged = QtCore.Signal()
     linkActivated = QtCore.Signal(str)
@@ -305,6 +318,12 @@ class Graphic(QtWidgets.QGraphicsWidget):
         self._hilited = False
         self._hilite_value = 0.0
         self._poof_anim: Optional[QtCore.QAbstractAnimation] = None
+
+        # If you don't explicitly set a text size, it gets huge for some reason
+        # when the view is scaled
+        font = QtGui.QFont()
+        font.setPixelSize(12)
+        super().setFont(font)
 
     def contextMenuEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
         print("Graphic context menu=", event)
@@ -499,9 +518,8 @@ class Graphic(QtWidgets.QGraphicsWidget):
         else:
             scene = self.scene()
             if scene:
-                srect = scene.sceneRect()
-                return srect
-        return QtCore.QRectF()
+                return scene.sceneRect()
+            return QtCore.QRectF()
 
     def viewportRect(self) -> QtCore.QRectF:
         # This must return the visible rect in SCENE coordinates
@@ -1299,7 +1317,10 @@ class ClickableGraphic(RectangleGraphic):
 
     def mousePressEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
         super().mousePressEvent(event)
-        if self._clickable:
+        # Because of QGraphicsWidget's "mouse grabber" system, a "press" might
+        # not actually be on this item
+        pos = event.pos()
+        if self._clickable and self.rect().contains(pos):
             self._inside = True
             self._is_down = True
             self._mouse_pressed = True

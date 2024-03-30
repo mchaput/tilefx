@@ -20,9 +20,14 @@ TierList = Sequence[Tuple[int, str]]
 formatter_class_registery: Dict[str, Type[NumberFormatter]] = {}
 formattertype = registrar(formatter_class_registery)
 
-LIGHT_WEIGHT = 400
-NORMAL_WEIGHT = 600
+NEGATIVE_CHAR = "-"
+# NEGATIVE_CHAR = "\u2212"
+LIGHT_WEIGHT = 100
+NORMAL_WEIGHT = 400
 BOLD_WEIGHT = 700
+
+WHOLE_WEIGHT = NORMAL_WEIGHT
+FRACTION_WEIGHT = LIGHT_WEIGHT
 
 
 class NumberType(enum.Enum):
@@ -60,8 +65,12 @@ class FormattedNumber(FormattedValue):
     prefix: str = ""
     suffix: str = ""
     brief: bool = False
-    whole_weight: int | str = BOLD_WEIGHT
-    fraction_weight: int | str = LIGHT_WEIGHT
+    whole_weight: int | str = WHOLE_WEIGHT
+    fraction_weight: int | str = WHOLE_WEIGHT
+
+    @property
+    def is_negative(self) -> bool:
+        return self.original < 0
 
     def plainText(self) -> str:
         return "".join((self.prefix, self.text, self.fraction, self.suffix))
@@ -76,7 +85,7 @@ class FormattedNumber(FormattedValue):
         if self.prefix:
             html = f"<span>{self.prefix}</span>{html}"
         if self.fraction:
-            html = f"{html}<span style='font-weight: {fw}'>{self.fraction}"
+            html = f"{html}<span style='font-weight: {fw}'>{self.fraction}</span>"
         if self.suffix:
             html = f"{html}{abbr(self.suffix)}"
         return html
@@ -87,8 +96,8 @@ class FormattedNumber(FormattedValue):
 
 @dataclasses.dataclass
 class FormattedDuration(FormattedNumber):
-    whole_weight: int = BOLD_WEIGHT
-    fraction_weight: int = LIGHT_WEIGHT
+    whole_weight: int = WHOLE_WEIGHT
+    fraction_weight: int = WHOLE_WEIGHT
     decimal_places: int = 1
     auto_decimal: int = 1
     long: bool = False
@@ -171,8 +180,8 @@ class NumberFormatter:
         self._briefmode = brief_mode
         self._briefcut = 10000
         self._tiers = tiers
-        self._whole_weight = BOLD_WEIGHT
-        self._fraction_weight = LIGHT_WEIGHT
+        self._whole_weight = WHOLE_WEIGHT
+        self._fraction_weight = WHOLE_WEIGHT
 
     @classmethod
     def fromData(cls, typename: str, data: Dict[str, Any]) -> NumberFormatter:
@@ -244,12 +253,13 @@ class NumberFormatter:
     def formatInt(self, value: Union[int, float], is_brief=False
                   ) -> FormattedNumber:
         # After formatting replace hyphen with actual unicode minus sign
-        text = f"{value:,d}".replace("-", "\u2212")
+        text = f"{value:,d}".replace("-", NEGATIVE_CHAR)
         return FormattedNumber(value, text, type=NumberType.integer,
                                brief=is_brief, whole_weight=self._whole_weight)
 
     def formatFloat(self, value: float, avail_digits: int, places: int,
                     is_brief=False) -> FormattedNumber:
+        negative = value < 0.0
         if places >= 0:
             value = round(value, places)
         ww = self._whole_weight
@@ -264,13 +274,18 @@ class NumberFormatter:
 
         dot = text.find(".")
         if dot >= 0:
+            digit_count = sum(c in "0123456789" for c in text)
             whole = text[:dot]
             frac = text[dot + 1:]
             # Reconvert the whole part of the number to give it commas
             whole = f"{int(whole):,d}"
-
-            digit_count = len(whole) + len(frac)
-            if avail_digits > 0 and digit_count > avail_digits:
+            # We had to int(whole) to get commas, but if whole was "-0", it will
+            # lose the sign, so we have to put it back
+            if negative and not whole.startswith("-"):
+                whole = f"{NEGATIVE_CHAR}{whole}"
+            else:
+                whole = whole.replace("-", NEGATIVE_CHAR)
+            if 0 < avail_digits < digit_count:
                 places = max(0, avail_digits - len(whole))
                 rounded = round(value, places)
                 frac = str(rounded)[dot + 1:]
@@ -283,7 +298,7 @@ class NumberFormatter:
 
     def formatScientific(self, value: Union[int, float]) -> FormattedNumber:
         # After formatting replace hyphen with actual unicode minus sign
-        text = f"{value:e}".replace("-", "\u2212")
+        text = f"{value:e}".replace("-", NEGATIVE_CHAR)
         return FormattedNumber(value, text, type=NumberType.oversized,
                                whole_weight=self._whole_weight,
                                fraction_weight=self._fraction_weight)
@@ -329,7 +344,7 @@ class NumberFormatter:
                                        whole_weight=self._whole_weight)
             elif math.isinf(value):
                 if value < 0:
-                    text = "\u2212\u221e"  # minus-sign infinity
+                    text = f"{NEGATIVE_CHAR}\u221e"  # minus-sign infinity
                 else:
                     text = "\u221e"  # infinity
                 fn = FormattedNumber(value, text, type=NumberType.weird,
@@ -426,8 +441,8 @@ def format_number(value: [Union[int, float]], brief=False, markup=False) -> str:
 
 
 def format_duration(secs: float, markup=True, decimal_places=1, long=False,
-                    auto_decimal=1, whole_weight=BOLD_WEIGHT,
-                    fraction_weight=NORMAL_WEIGHT) -> str:
+                    auto_decimal=1, whole_weight=WHOLE_WEIGHT,
+                    fraction_weight=FRACTION_WEIGHT) -> str:
     if decimal_places == 0 and auto_decimal and 0 < secs < 1.0:
         decimal_places = auto_decimal
     secs = round(secs, decimal_places)
@@ -508,7 +523,7 @@ def abbr(string: str, size="0.8em", weight=LIGHT_WEIGHT) -> str:
 
 
 def markup_float(string: Union[float, str], show_fraction=True,
-                 whole_weight=BOLD_WEIGHT, fraction_weight=LIGHT_WEIGHT) -> str:
+                 whole_weight=WHOLE_WEIGHT, fraction_weight=WHOLE_WEIGHT) -> str:
     string = str(string)
     dot = string.find(".")
     if dot >= 0:

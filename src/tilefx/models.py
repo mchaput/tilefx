@@ -6,7 +6,7 @@ from typing import (TYPE_CHECKING, cast, Any, Callable, Collection, Iterable,
 from PySide2 import QtCore
 from PySide2.QtCore import Qt
 
-from . import config, converters, themes
+from . import config, converters, themes, util
 from .config import Expr
 
 
@@ -104,6 +104,7 @@ class RowData(NamedTuple):
 class RowFactory:
     def __init__(self):
         self._column_count = 0
+        self._var_map: dict[str, Expr] = {}
         self._expr_map: dict[DataID, Expr] = {}
         self._unique_data_id: Optional[DataID] = None
 
@@ -112,6 +113,12 @@ class RowFactory:
 
     def setColumnCount(self, count: int) -> None:
         self._column_count = count
+
+    def variableMap(self) -> dict[str, Expr]:
+        return self._var_map
+
+    def setVariableMap(self, var_map: dict[str, Expr]) -> None:
+        self._var_map = var_map
 
     def exprMap(self) -> dict[DataID, Expr]:
         return self._expr_map
@@ -132,15 +139,22 @@ class RowFactory:
                      ) -> Iterable[RowData]:
         raise NotImplementedError
 
+    def _addVariables(self, data: dict[str, Any], env: dict[str, Any]
+                      ) -> None:
+        for var_name, expr in self._var_map.items():
+            env[var_name] = expr.evaluate(data, env)
+
     def generateRows(self, data: dict[str, Any], env: dict[str, Any],
                      unique_id: Optional[DataID]
                      ) -> Iterable[dict[DataID, Scalar]]:
         unique_id = self.uniqueDataID()
         expr_map = self.exprMap()
         unique_val_set: set[Scalar] = set()
+
         for row_data in self.findRowDatas(data, env):
             row: dict[DataID, Scalar] = {}
             row_data.env["obj"] = row_data.values
+            self._addVariables(data, row_data.env)
 
             # Compute the key value first, and use it to compute the row color,
             # check for uniqueness, etc.
@@ -217,6 +231,8 @@ class LiteralRowFactory(RowFactory):
     def generateRows(self, data: dict[str, Any], env: dict[str, Any],
                      unique_id: Optional[DataID]
                      ) -> Iterable[tuple[dict[DataID, Scalar]]]:
+        env = env.copy()
+        self._addVariables(data, env)
         for row_dict in self.row_list:
             row: dict[DataID, Scalar] = {}
             for data_id, v in row_dict.items():
@@ -418,6 +434,14 @@ class BaseDataModel(QtCore.QAbstractTableModel):
             name_map[role_num] = QtCore.QByteArray(name.encode("ascii"))
         return name_map
 
+    def roleNumberToName(self, role_num: int) -> str:
+        num_to_name = util.invertedDict(self._role_lookup)
+        return num_to_name[role_num]
+
+    def dataIDtoSpec(self, data_id: DataID) -> str:
+        role_name = self.roleNumberToName(data_id.role)
+        return f"{data_id.column}.{role_name}"
+
     def toDataID(self, spec: str | DataID) -> DataID:
         if spec in self._spec_cache:
             return self._spec_cache[spec]
@@ -433,6 +457,9 @@ class BaseDataModel(QtCore.QAbstractTableModel):
     def setUniqueDataID(self, spec: str | DataID) -> None:
         unique_id = self.toDataID(spec)
         self._unique_data_id = unique_id
+
+    def clear(self) -> None:
+        raise NotImplementedError
 
     def updateFromData(self, data: dict[str, Any], env: dict[str, Any]) -> None:
         raise NotImplementedError
@@ -453,6 +480,11 @@ class DataModel(BaseDataModel):
         model = cls(parent=parent)
         model.configureFromData(data, controller)
         return model
+
+    def clear(self) -> None:
+        self.beginResetModel()
+        self._rows.clear()
+        self.endResetModel()
 
     def colorMap(self) -> ColorMap:
         return self._color_map
@@ -580,6 +612,11 @@ class DataModel(BaseDataModel):
             else:
                 raise TypeError(f"Not a valid row factory: {rows}")
 
+            var_data = data.pop("variables", None)
+            if isinstance(var_data, dict):
+                var_map = config.exprMap(var_data, controller)
+                factory.setVariableMap(var_map)
+
             if expr_map:
                 factory.setExprMap(expr_map)
             self._row_factory = factory
@@ -635,7 +672,9 @@ class DataModel(BaseDataModel):
         for i, row in enumerate(rows):
             v = row[unique_id]
             if v in new_map:
-                raise Exception(f"Unique values {unique_id} not unique: {v!r}")
+                spec = self.dataIDtoSpec(unique_id)
+                raise Exception(f"Unique values {spec} not unique "
+                                f"in {self.objectName()}: {v!r}")
             new_map[v] = i
         return new_map
 

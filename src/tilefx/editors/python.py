@@ -5,7 +5,7 @@ import re
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
 
-from .syntax import Style, number_expr, styleColor
+from .syntax import HighlighterBase, Style, number_expr
 
 
 c_escape = re.compile(r"\\[\\nrtbf'\"]")
@@ -172,7 +172,7 @@ def token(state_int: int, line: str, pos=0) -> tuple[Style, int, int]:
         return Style.plain, pos + 1, state_int
 
 
-class PythonHighlighter(QtGui.QSyntaxHighlighter):
+class PythonHighlighter(HighlighterBase):
     def highlightBlock(self, text: str) -> None:
         state_int = self.previousBlockState()
         pos = 0
@@ -187,7 +187,7 @@ class PythonHighlighter(QtGui.QSyntaxHighlighter):
                 raise Exception(
                     f"Lexer stalled in state {state_int} @{pos} in {text!r}"
                 )
-            color = styleColor(style)
+            color = self.styleColor(style)
             self.setFormat(pos, endpos, color)
             pos = endpos
 

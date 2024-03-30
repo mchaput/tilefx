@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import enum
 import math
-from typing import Any, Callable, Iterable, Optional, Sequence, TypeVar, Union
+from typing import (TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence,
+                    TypeVar, Union)
 
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
@@ -10,6 +11,9 @@ from PySide2.QtCore import Qt
 from .. import converters
 from ..config import settable
 from ..util import validSizeHint
+
+if TYPE_CHECKING:
+    from .core import Graphic
 
 
 DEFAULT_GRID_SPACING = 4.0
@@ -1098,6 +1102,10 @@ class KeyValueArrangement(Arrangement):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
         self._spacing = QtCore.QSizeF(10.0, 0.0)
+        # The arrangement needs to find child items of each item to measure them
+        # before laying out. It tries to find them by name, and if that doesn't
+        # work, it uses the first child as the key and second child as the
+        # value.
         self._key_item_name = "key"
         self._value_item_name = "value"
 
@@ -1109,6 +1117,24 @@ class KeyValueArrangement(Arrangement):
     def setValueItemName(self, name: str) -> None:
         self._value_item_name = name
 
+    @staticmethod
+    def _keyChildItem(item: Graphic, name: str) -> Optional[Graphic]:
+        key_item = item.findChildGraphic(name)
+        if not key_item:
+            kids = item.childGraphics()
+            if kids:
+                key_item = kids[0]
+        return key_item
+
+    @staticmethod
+    def _valueChildItem(item: Graphic, name: str) -> Optional[Graphic]:
+        value_item = item.findChildGraphic(name)
+        if not value_item:
+            kids = item.childGraphics()
+            if len(kids) > 1:
+                value_item = kids[1]
+        return value_item
+
     def _rects(self, which: Qt.SizeHint, geom: QtCore.QRectF,
                items: Sequence[QtWidgets.QGraphicsWidget]
                ) -> Iterable[ItemRectPair]:
@@ -1119,13 +1145,22 @@ class KeyValueArrangement(Arrangement):
         if not items:
             return
 
+        key_name = self._key_item_name
+        value_name = self._value_item_name
+        kci = self._keyChildItem
+        vci = self._valueChildItem
         hspace = self._spacing.width()
         vspace = self._spacing.height()
         rect = geom.marginsRemoved(self._margins)
+
+        # Measure each key item to figure out how wide the left column should be
         key_size = QtCore.QSizeF()
         constraint = QtCore.QSizeF(rect.width() / 2.0, -1)
+        # Remember the key items so we don't have to find them again
+        key_items: list[Graphic] = []
         for item in items:
-            key_item = item.findChildGraphic(self._key_item_name)
+            key_item = kci(item, key_name)
+            key_items.append(key_item)
             if key_item:
                 if isinstance(key_item, StringGraphic):
                     size = key_item.implicitSize()
@@ -1133,14 +1168,14 @@ class KeyValueArrangement(Arrangement):
                     size = key_item.sizeHint(Qt.PreferredSize, constraint)
                 key_size = key_size.expandedTo(size)
 
+        # Lay out the items
         kw = key_size.width()
         vx = kw + hspace
         vw = rect.width() - kw - hspace
         constraint = QtCore.QSizeF(vw, -1)
         y = rect.y()
-        for item in items:
-            key_item = item.findChildGraphic(self._key_item_name)
-            value_item = item.findChildGraphic(self._value_item_name)
+        for key_item, item in zip(key_items, items):
+            value_item = vci(item, value_name)
             h = key_size.height()
             if key_item:
                 key_rect = QtCore.QRectF(QtCore.QPointF(0, 0), key_size)
