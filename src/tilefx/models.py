@@ -335,6 +335,21 @@ def specToDataID(model: QtCore.QAbstractItemModel,
     return DataID(column, role)
 
 
+def dataIDToSpec(model: QtCore.QAbstractItemModel, data_id: DataID) -> str:
+    # Only use this for debugging
+    spec = "?"
+    for role_num, name_qbytes in model.roleNames().items():
+        if role_num == data_id.role:
+            spec = bytes(name_qbytes).decode("utf-8")
+            break
+        else:
+            raise Exception(f"No name for role {role_num} in {model}")
+    col = data_id.column
+    if col != 0:
+        spec = f"{col}.{spec}"
+    return spec
+
+
 class ColorMap:
     def __init__(self):
         self._colors = tuple(themes.default_chart_colors)
@@ -398,7 +413,8 @@ def modelFromData(data: dict[str, Any], controller: config.DataController,
 class BaseDataModel(QtCore.QAbstractTableModel):
     NoUniqueID = object()
     UniqueIDRole = Qt.UserRole
-    CustomRoleBase = Qt.UserRole + 1
+    MeasurementRole = Qt.UserRole + 1
+    CustomRoleBase = Qt.UserRole + 2
 
     def __init__(self, parent: QtCore.QObject = None):
         super().__init__(parent)
@@ -411,9 +427,10 @@ class BaseDataModel(QtCore.QAbstractTableModel):
         for role_num, name_qbytes in super().roleNames().items():
             self._role_lookup[bytes(name_qbytes).decode("utf-8")] = role_num
 
-    def addCustomRole(self, name: str) -> int:
-        role_number = self.CustomRoleBase + self._next_custom_role
-        self._next_custom_role += 1
+    def addCustomRole(self, name: str, role_number: int = None) -> int:
+        if role_number is None:
+            role_number = self.CustomRoleBase + self._next_custom_role
+            self._next_custom_role += 1
         self._role_lookup[name] = role_number
         return role_number
 
@@ -465,6 +482,18 @@ class BaseDataModel(QtCore.QAbstractTableModel):
         raise NotImplementedError
 
 
+def orderingFromList(values: Sequence[Any], unique_id: DataID
+                     ) -> Callable[[dict[DataID, Any]], int]:
+    def _ordering(row: dict[DataID, Any]) -> int:
+        if unique_id in row:
+            try:
+                return values.index(row[unique_id])
+            except ValueError:
+                pass
+        return len(values)
+    return _ordering
+
+
 class DataModel(BaseDataModel):
     def __init__(self, parent: QtCore.QObject = None):
         super().__init__(parent)
@@ -473,6 +502,9 @@ class DataModel(BaseDataModel):
         self._row_factory: RowFactory = NullRowFactory()
         self._color_data_id = DataID(0, Qt.DecorationRole)
         self._color_map = ColorMap()
+        self._ordering_fn: Optional[Callable] = None
+        self._sort_by: Optional[DataID] = None
+        self._ignored_keys: Collection[int | str] = ()
 
     @classmethod
     def fromData(cls, data: dict[str, Any], controller: config.DataController,
@@ -575,6 +607,15 @@ class DataModel(BaseDataModel):
                     for k, v in spec_map.items()}
         return expr_map
 
+    def setKeyOrdering(self, ordered_keys: Sequence[str | int]) -> None:
+        self._ordering_fn = orderingFromList(ordered_keys, self.uniqueDataID())
+
+    def setSortByDataID(self, data_id: DataID) -> None:
+        self._sort_by = data_id
+
+    def setIgnoredKeys(self, ignored_keys: Collection) -> None:
+        self._ignored_keys = ignored_keys
+
     def configureFromData(self, data: dict[str, Any],
                           controller: config.DataController) -> None:
         original = data
@@ -636,6 +677,18 @@ class DataModel(BaseDataModel):
             # Use various keys in the data to configure the row color map
             self._configureColorMap(data)
 
+            key_order = data.pop("key_order", None)
+            if isinstance(key_order, (list, tuple)):
+                self.setKeyOrdering(key_order)
+            elif key_order is not None:
+                raise TypeError(f"Can't use {key_order} as key order")
+
+            ignore_keys = data.pop("ignore_keys", ())
+            if isinstance(ignore_keys, (list, tuple, set, dict, frozenset)):
+                self.setIgnoredKeys(set(ignore_keys))
+            elif ignore_keys is not None:
+                raise TypeError(f"Can't use {ignore_keys} as ignore key set")
+
             # The previous steps should have popped known keys out of the dict,
             # so if there are any left they are errors
             if data:
@@ -649,9 +702,13 @@ class DataModel(BaseDataModel):
         color_map.reset()
         unique_id = self.uniqueDataID()
         color_id = self.colorDataID()
+        ignored_keys = self._ignored_keys
 
         new_rows: list[dict[DataID, Scalar]] = []
         for row in self._row_factory.generateRows(data, env, unique_id):
+            if unique_id and row.get(unique_id) in ignored_keys:
+                continue
+
             # If we have a unique DataID and a color DataID, and this row has
             # the key value but not a color value already, supply a color
             # from the color map
@@ -659,6 +716,9 @@ class DataModel(BaseDataModel):
                     unique_id in row and color_id not in row):
                 row[color_id] = color_map.colorForKey(row[unique_id])
             new_rows.append(row)
+
+        if self._ordering_fn:
+            new_rows.sort(key=self._ordering_fn)
 
         if unique_id:
             self._updateUsingUniqueID(new_rows)

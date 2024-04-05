@@ -1464,13 +1464,13 @@ class ArrangementLayout(QtWidgets.QGraphicsLayout):
         self._items.insert(new_index, item)
 
     def setGeometry(self, geom: QtCore.QRectF) -> None:
-        if self._debug:
-            print("RELAYOUT", self._debug, geom)
+        # if self._debug:
+        #     print("RELAYOUT", self._debug, geom)
         self._arrangement.layoutItems(geom, self._items)
 
     def sizeHint(self, which: Qt.SizeHint,
                  constraint: QtCore.QSizeF = None) -> QtCore.QSizeF:
         hint = self._arrangement.sizeHint(which, constraint, self._items)
-        if self._debug:
-            print("LSH", self._debug, which, constraint, "=", hint)
+        # if self._debug:
+        #     print("LSH", self._debug, which, constraint, "=", hint)
         return hint

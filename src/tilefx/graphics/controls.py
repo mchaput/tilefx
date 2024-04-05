@@ -11,7 +11,7 @@ import tilefx.util
 from .. import config, converters, formatting, glyphs, styling, themes, util
 from ..config import settable
 from ..themes import ThemeColor
-from . import core, layouts
+from . import core, layouts, widgets
 from .core import graphictype, path_element, Graphic, DynamicColor
 
 
@@ -97,66 +97,7 @@ class ScrollBarItem(QtWidgets.QGraphicsProxyWidget):
         self._handle.setGeometry(hr)
 
 
-class ScrollBar(QtWidgets.QScrollBar):
-    def __init__(self, orientation: Qt.Orientation,
-                 parent: QtWidgets.QWidget = None):
-        super().__init__(orientation, parent)
-        self._track_width = 4.0
-        self._style = QtWidgets.QCommonStyle()
-
-    def trackAndHandleRects(self, track_width: float
-                            ) -> tuple[QtCore.QRectF, QtCore.QRectF]:
-        option = QtWidgets.QStyleOptionSlider()
-        option.initFrom(self)
-        option.minimum = self.minimum()
-        option.maximum = self.maximum()
-        option.orientation = self.orientation()
-        option.singleStep = self.singleStep()
-        option.pageStep = self.pageStep()
-        option.sliderPosition = self.sliderPosition()
-        option.sliderValue = self.sliderPosition()
-        option.upsideDown = self.invertedAppearance()
-
-        style = self._style
-        track_rect = QtCore.QRectF(style.subControlRect(
-            style.CC_ScrollBar, option, style.SC_ScrollBarGroove, self
-        ).normalized())
-        handle_rect = QtCore.QRectF(style.subControlRect(
-            style.CC_ScrollBar, option, style.SC_ScrollBarSlider, self
-        ).normalized())
-
-        hw = track_width / 2.0
-        ctr = track_rect.center()
-        if option.orientation == Qt.Vertical:
-            cx = ctr.x() - hw
-            tr = QtCore.QRectF(cx, track_rect.y(),
-                               track_width, track_rect.height())
-            hr = QtCore.QRectF(cx, handle_rect.y(),
-                               track_width, handle_rect.height())
-        else:
-            cy = ctr.y() - hw
-            tr = QtCore.QRectF(track_rect.x(), cy,
-                               track_rect.width(), track_width)
-            hr = QtCore.QRectF(handle_rect.x(), cy,
-                               handle_rect.width(), track_width)
-
-        return tr, hr
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
-        painter = QtGui.QPainter(self)
-        track_rect, handle_rect = self.trackAndHandleRects(self._track_width)
-        half_width = self._track_width / 2.0
-        handle_color = self.palette().button().color()
-        track_color = QtGui.QColor(handle_color)
-        track_color.setAlphaF(0.5)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(track_color)
-        painter.drawRoundedRect(track_rect, half_width, half_width)
-        painter.setBrush(handle_color)
-        painter.drawRoundedRect(handle_rect, half_width, half_width)
-
-
-class InvisibleScrollBar(ScrollBar):
+class InvisibleScrollBar(widgets.ScrollBar):
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         # Override the widget's paint event to do nothing
         pass
@@ -680,7 +621,7 @@ class AbstractTextGraphic(core.RectangleGraphic):
               option: QtWidgets.QStyleOptionGraphicsItem,
               widget: Optional[QtWidgets.QWidget] = None) -> None:
         if self._bg_visible:
-            super().paint(painter, option, widget)
+            self._paintRectangle(painter)
 
 
 @graphictype("controls.string")
@@ -779,14 +720,17 @@ class StringGraphic(AbstractTextGraphic):
         # color = self.effectiveTextColor()
         # self._item.setBrush(color)
 
+    def hasImplicitSize(self) -> bool:
+        return True
+
     def implicitSize(self) -> QtCore.QSizeF:
         text = self.text()
-        if not text:
-            return QtCore.QSizeF()
-
         ms = self.margins()
-        width = self._text_size.width() + ms.left() + ms.right()
         height = self._text_size.height() + ms.top() + ms.bottom()
+        if text:
+            width = self._text_size.width() + ms.left() + ms.right()
+        else:
+            width = 0.0
         return QtCore.QSizeF(width, height)
 
     def sizeHint(self, which: Qt.SizeHint, constraint: QtCore.QSizeF = None
@@ -1002,7 +946,7 @@ class TextGraphic(AbstractTextGraphic):
         # self._item.setFlag(self.ItemIsFocusable, False)
 
     def linkClicked(self, url: str) -> None:
-        print("LINK=", url)
+        # print("LINK=", url)
         scene = self.scene()
         if isinstance(scene, core.GraphicScene):
             scene.linkClicked(url)
@@ -2126,9 +2070,59 @@ class FancyButtonGraphic(ButtonGraphic):
 class SimpleCheckboxGraphic(StringGraphic):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
+        self._check_blend = 0.0
         self._checkstate = Qt.Unchecked
         self._change_expr: Optional[config.Expr] = None
         self._click_expr: Optional[config.Expr] = None
+
+        self._bg_off = ThemeColor.button
+        self._bg_on = ThemeColor.primary
+        self._dot_off = ThemeColor.button
+        self._dot_on = ThemeColor.pressed
+
+    _bg_off = DynamicColor()
+    _bg_on = DynamicColor()
+    _dot_off = DynamicColor()
+    _dot_on = DynamicColor()
+
+    @settable("off_bg_color", converter=converters.colorConverter)
+    def setOffBackgroundColor(self, color: converters.ColorSpec) -> None:
+        self._bg_off = color
+
+    @settable("on_bg_color", converter=converters.colorConverter)
+    def setOnBackgroundColor(self, color: converters.ColorSpec) -> None:
+        self._bg_on = color
+
+    @settable("off_dot_color", converter=converters.colorConverter)
+    def setOffDotColor(self, color: converters.ColorSpec) -> None:
+        self._dot_off = color
+
+    @settable("on_dot_color", converter=converters.colorConverter)
+    def setOnDotColor(self, color: converters.ColorSpec) -> None:
+        self._dot_on = color
+
+    def _checkBlend(self) -> float:
+        return self._check_blend
+
+    def _setCheckBlend(self, active: float) -> None:
+        self._check_blend = active
+        self.update()
+
+    check_blend = QtCore.Property(float, _checkBlend, _setCheckBlend)
+
+    def hasImplicitSize(self) -> bool:
+        return True
+
+    def implicitSize(self) -> QtCore.QSizeF:
+        impsize = self._implicit_size
+        if impsize:
+            return QtCore.QSizeF(self._implicit_size)
+        else:
+            fxh = self._fixed_height
+            height = 16.0 if fxh is None else fxh
+            fxw = self._fixed_width
+            width = height * 2 if fxw is None else fxw
+        return QtCore.QSizeF(width, height)
 
     def localEnv(self) -> dict[str, Any]:
         return {
@@ -2138,19 +2132,34 @@ class SimpleCheckboxGraphic(StringGraphic):
 
     def mousePressEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
         event.accept()
+        mods = event.modifiers()
+        extra_env = {
+            "ctrl_key": bool(mods & Qt.ControlModifier or mods),
+            "shift_key": bool(mods & Qt.ShiftModifier),
+            "alt_key": bool(mods & Qt.AltModifier),
+            "meta_key": bool(mods & Qt.MetaModifier),
+        }
         self.toggle()
-        self._evaluateExpr(self._click_expr)
+        self._evaluateExpr(self._click_expr, extra_env=extra_env)
 
     def checkState(self) -> Qt.CheckState:
         return self._checkstate
 
     def setCheckState(self, state: Qt.CheckState, *, animated=False) -> None:
         if state != self._checkstate:
+            animated = animated and not self.animationDisabled()
             self._checkstate = state
             self._evaluateExpr(self._change_expr)
 
-            bg = themes.ThemeColor.pressed if self.isChecked() else None
-            self.setFillColor(bg)
+            active = float(self.isChecked())
+            if animated:
+                self.stopPropertyAnimation(b"check_blend")
+                self.animateProperty(
+                    b"check_blend", self._checkBlend(), active,
+                    curve=QtCore.QEasingCurve.InOutBack
+                )
+            else:
+                self._setCheckBlend(active)
 
     def isChecked(self) -> bool:
         return self._checkstate == Qt.Checked
@@ -2160,8 +2169,9 @@ class SimpleCheckboxGraphic(StringGraphic):
         self.setCheckState(Qt.Checked if checked else Qt.Unchecked,
                            animated=animated)
 
-    def toggle(self, *, animated=False) -> None:
+    def toggle(self, *, animated=True) -> None:
         self.setChecked(not self.isChecked(), animated=animated)
+        self.update()
 
     @settable("on_click")
     def setOnClickExpression(self, expr: Union[str, dict, config.PythonExpr]
@@ -2172,6 +2182,43 @@ class SimpleCheckboxGraphic(StringGraphic):
     def setOnStateChangeExpression(self, expr: Union[str, dict, config.PythonExpr]
                                    ) -> None:
         self._change_expr = config.PythonExpr.fromData(expr)
+
+    def animateBlend(self, blend: float, **kwargs) -> None:
+        self.animateProperty(b"blend", self.blendValue(), blend, **kwargs)
+
+    def paint(self, painter: QtGui.QPainter,
+              option: QtWidgets.QStyleOptionGraphicsItem,
+              widget: Optional[QtWidgets.QWidget] = None) -> None:
+        rect = self.rect()
+        inner = rect.marginsRemoved(self.margins())
+        if not inner.isValid():
+            return
+
+        width = self._text_size.width()
+        side = max(width, min(inner.width(), inner.height()))
+
+        blend = self._checkBlend()
+        bg_c = themes.blend(self._bg_off, self._bg_on, blend)
+        dot_c = themes.blend(self._dot_off, self._dot_on, blend)
+
+        x1 = inner.x()
+        x2 = inner.right() - side
+        x = x1 + (x2 - x1) * blend
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(bg_c)
+        outer_r = min(rect.width(), rect.height()) / 2
+        painter.drawRoundedRect(rect, outer_r, outer_r)
+
+        box = QtCore.QRectF(x, inner.y(), side, side)
+        painter.setBrush(dot_c)
+        painter.drawRoundedRect(box, side / 2, side / 2)
+
+        painter.setBrush(Qt.NoBrush)
+        color = self.effectiveTextColor()
+        painter.setFont(self.font())
+        painter.setPen(color)
+        painter.drawText(box, Qt.AlignCenter, self.text())
 
 
 @graphictype("controls.checkbox")
@@ -3027,16 +3074,19 @@ class MxButtonStrip(ButtonStrip):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
         self._change_expr: Optional[config.PythonExpr] = None
+        self._current_index = -1
 
     def localEnv(self) -> dict[str, Any]:
-        return {
-            "current_index": self.currentIndex(),
-        }
+        env = super().localEnv()
+        env["current_index"] = self._current_index
+        return env
 
     def addChild(self, item: ButtonGraphic, index: int = None
                  ) -> None:
         item.setCheckable(True)
-        item.setUncheckable(False)
+        item.setUncheckable(True)
+        if self._current_index == -1:
+            self._current_index = 0
         item.setChecked(not self._items)  # Check the first item by default
 
         def callback(checked: bool) -> None:
@@ -3054,27 +3104,25 @@ class MxButtonStrip(ButtonStrip):
             item.hide()
 
     def currentIndex(self) -> int:
-        for i, it in enumerate(self._items):
-            if it.isChecked():
-                return i
-        return -1
+        return self._current_index
 
     def currentItem(self) -> Optional[ButtonGraphic]:
-        for it in self._items:
-            if it.isChecked():
-                return it
+        if self._current_index < 0:
+            raise ValueError("No buttons")
+        return self._items[self._current_index]
 
     @settable()
-    def setCurrentIndex(self, index: int) -> None:
+    def setCurrentIndex(self, index: int, animated=False) -> None:
+        self._current_index = index
         for i, it in enumerate(self._items):
-            it.setChecked(i == index)
+            it.setChecked(i == index, animated=animated)
             it.setZValue(2 if i == index else 0)
         self.currentIndexChanged.emit(index)
         self._evaluateExpr(self._change_expr)
 
-    def setCurrentItem(self, item: ButtonGraphic) -> None:
+    def setCurrentItem(self, item: ButtonGraphic, animated=False) -> None:
         index = self._items.index(item)
-        self.setCurrentIndex(index)
+        self.setCurrentIndex(index, animated=animated)
 
     @settable("on_current_change")
     def setOnCurrentChangeExpression(
@@ -3322,6 +3370,9 @@ class TabDotsGraphic(core.ClickableGraphic):
         self._rounded = rounded
         self._dot.setPillShaped(rounded)
         self.update()
+
+    def hasImplicitSize(self) -> bool:
+        return True
 
     def implicitSize(self) -> QtCore.QSizeF:
         count = self.count()

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import enum
 import time
 from collections import defaultdict
 from typing import cast, Any, Collection, Iterable, Optional, Sequence, Union
@@ -6,9 +7,9 @@ from typing import cast, Any, Collection, Iterable, Optional, Sequence, Union
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
 
-from .. import models
+from .. import config, models
 from ..config import settable
-from . import core, controls, layouts, themes
+from . import core, containers, converters, controls, layouts, themes
 from .core import graphictype, path_element, Graphic, DataGraphic
 
 
@@ -18,326 +19,16 @@ ITEM_ROW_NUM = 22
 ITEM_SECTION_VALUE = 134
 
 
-@graphictype("views.scroll")
-class ScrollGraphic(core.RectangleGraphic):
-    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
-        super().__init__(parent)
-        self._last_content_size = QtCore.QSizeF(-1, -1)
-        self._updating_contents = False
-        self._content: Optional[Graphic] = None
-        self._scroll_pos = QtCore.QPointF(0, 0)
-        self._vsb_item = controls.ScrollBarItem(Qt.Vertical, self)
-        self._vsb_item.setZValue(20)
-        self._title_item: Optional[Graphic] = None
-        self._title_target_name: Optional[str] = None
-        self._title_target_item: Optional[Graphic] = None
-        self._title_min_y = 0.0
-        self._title_shown = False
-        self._footer_item: Optional[Graphic] = None
-
-        self._match_width = True
-        self.setClipping(True)
-
-        self.verticalScrollBar().valueChanged.connect(self._onVScroll)
-        self.verticalScrollBar().setSingleStep(16)
-
-        self._updateContents()
-
-    # def itemChange(self, change: QtWidgets.QGraphicsItem.GraphicsItemChange,
-    #                value: Any) -> Any:
-    #     if change == self.ItemSceneChange:
-    #         old_scene = self.scene()
-    #         if old_scene:
-    #             old_scene.sceneRectChanged.disconnect(self.updateGeometry)
-    #         new_scene = cast(QtWidgets.QGraphicsScene, value)
-    #         new_scene.sceneRectChanged.connect(self.updateGeometry)
-    #
-    #     return super().itemChange(change, value)
-
-    def setGeometry(self, rect: QtCore.QRectF) -> None:
-        super().setGeometry(rect)
-        self._updateContents()
-
-    def resizeEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
-        super().resizeEvent(event)
-        self._updateContents()
-
-    def addChild(self, item: QtWidgets.QGraphicsItem) -> None:
-        self.setContentItem(item)
-
-    @path_element(Graphic, "contents")
-    def contentsItem(self) -> Graphic:
-        return self._content
-
-    @settable("content_item", value_object_type=Graphic)
-    def setContentItem(self, item: Graphic) -> None:
-        if self._content:
-            # self._content.removeEventFilter(self)
-            self._content.geometryChanged.disconnect(self._onContentSizeChanged)
-
-        self._content = item
-        item.setParentItem(self)
-        item.setZValue(0)
-
-        self._content.geometryChanged.connect(self._onContentSizeChanged)
-        self._content.installEventFilter(self)
-        self._updateContents()
-
-    def _onContentSizeChanged(self) -> None:
-        content = self._content
-        if content:
-            size = content.size()
-            if size.isEmpty():
-                return
-            if size != self._last_content_size:
-                if self._updating_contents:
-                    # print("already", self.objectName(), size)
-                    pass
-                else:
-                    self.updateGeometry()
-                    self._updateContents()
-                    self._last_content_size = size
-
-    def contentsSizeHint(self, which: Qt.SizeHint,
-                        constraint: QtCore.QSizeF = None) -> QtCore.QSizeF:
-        constraint = constraint or QtCore.QSizeF(-1, -1)
-        return self.contentsItem().sizeHint(which, constraint)
-
-    def eventFilter(self, watched: QtWidgets.QGraphicsWidget,
-                    event: QtCore.QEvent) -> bool:
-        if watched == self._content and event.type() == event.LayoutRequest:
-            self.prepareGeometryChange()
-            self.updateGeometry()
-            self._updateContents()
-        return super().eventFilter(watched, event)
-
-    def titleItem(self) -> Optional[Graphic]:
-        return self._title_item
-
-    @settable("title_item", value_object_type=Graphic)
-    def setTitleItem(self, item: Graphic) -> None:
-        self._title_item = item
-        item.setParentItem(self)
-        item.setZValue(10)
-        self._updateTitleAndFooterVisibility(animated=False)
-
-    def titleTargetItem(self) -> Optional[QtWidgets.QGraphicsWidget]:
-        name = self._title_target_name
-        item = self._title_target_item
-        if name and not item:
-            item = self.findChildGraphic(name, recursive=True)
-            self._title_target_item = item
-        return item
-
-    @settable("title_target")
-    def setTitleTargetName(self, object_name: str) -> None:
-        self._title_target_name = object_name
-        self._updateTitleAndFooterVisibility(animated=False)
-
-    @settable("title_min_y")
-    def setTitleMinimumY(self, min_y: float) -> None:
-        self._title_min_y = min_y
-        self._updateTitleAndFooterVisibility(animated=False)
-
-    def footerItem(self) -> Optional[Graphic]:
-        return self._footer_item
-
-    @settable("footer_item", value_object_type=Graphic)
-    def setFooterItem(self, item: Graphic) -> None:
-        self._footer_item = item
-        item.setParentItem(self)
-        item.setZValue(9)
-        self._updateContents()
-
-    def dataProxy(self) -> Optional[Graphic]:
-        return self.contentsItem()
-
-    def localEnv(self) -> dict[str, Any]:
-        return self.contentsItem().localEnv()
-
-    @path_element(Graphic, "title")
-    def titleItem(self) -> Graphic:
-        return self._title_item
-
-    @path_element(Graphic, "footer")
-    def footerItem(self) -> Graphic:
-        return self._footer_item
-
-    def verticalScrollBar(self) -> QtWidgets.QScrollBar:
-        return self._vsb_item.widget()
-
-    @settable("scroll_y")
-    def setScrollY(self, y: int) -> None:
-        self.verticalScrollBar().setValue(y)
-
-    def scrollToTop(self) -> None:
-        self.setScrollY(0)
-
-    def scrollbarNeeded(self) -> bool:
-        if self._content:
-            return self._content.size().height() > self.size().height()
-        else:
-            return False
-
-    def viewportRect(self) -> QtCore.QRectF:
-        # This must return the visible rect in SCENE coordinates
-        scene_r = self.parentViewportRect()
-        safe_r = self.mapRectToScene(self.safeArea())
-        return scene_r.intersected(safe_r)
-
-    def safeArea(self) -> QtCore.QRectF:
-        rect = self.rect()
-        if self.scrollbarNeeded():
-            vsb = self.verticalScrollBar()
-            rect.setRight(rect.right() - vsb.width())
-        if self.shouldShowTitle():
-            title = self._title_item
-            rect.setTop(rect.top() + title.size().height())
-        if self.shouldShowFooter():
-            footer = self._footer_item
-            rect.setBottom(rect.bottom() - footer.size().height())
-        return rect
-
-    def sizeHint(self, which: Qt.SizeHint, constraint: QtCore.QSizeF = None
-                 ) -> QtCore.QSizeF:
-        constraint = constraint or QtCore.QSizeF(-1, -1)
-        contents = self.contentsItem()
-        if contents:
-            vsb_width = self.verticalScrollBar().width()
-            cw = constraint.width()
-            if cw >= 0:
-                constraint.setWidth(cw - vsb_width)
-            size = contents.sizeHint(which, constraint)
-            return size
-        return constraint
-
-    def _onVScroll(self) -> None:
-        v = self.verticalScrollBar().value()
-        self._scroll_pos.setY(max(0, v))
-        self._updateScrollPosition()
-        self._updateTitleAndFooterVisibility()
-        self._vsb_item.update()
-
-    def _updateScrollPosition(self) -> None:
-        contents = self.contentsItem()
-        if not contents:
-            return
-        contents.setPos(-self._scroll_pos)
-
-    def _updateContents(self) -> None:
-        if self._updating_contents:
-            raise Exception(f"Already updating {self.objectName()}")
-        rect = self.rect()
-        width = rect.width()
-        page_height = rect.height()
-        contents = self.contentsItem()
-        if not contents:
-            return
-        self._updating_contents = True
-
-        vsb = self.verticalScrollBar()
-        vsb_width = vsb.width()
-        vsb_x = rect.right() - vsb_width
-        vsb_rect = QtCore.QRectF(vsb_x, rect.y(), vsb_width, rect.height())
-        # if self.objectName() == "root":
-        #     print("rect=", rect, "x=", vsb_x, "vsb=", vsb_rect)
-        self._vsb_item.setGeometry(vsb_rect)
-        self._vsb_item.update()
-        vsb.setPageStep(int(page_height))
-
-        if self._match_width:
-            vp_width = width - vsb_width - 1
-            constraint = QtCore.QSizeF(vp_width, -1)
-            csize = contents.sizeHint(Qt.PreferredSize, constraint)
-            # if csize.height() <= page_height:
-            #     vp_width = width
-            csize.setWidth(vp_width)
-            crect = QtCore.QRectF(-self._scroll_pos, csize)
-            contents.setGeometry(crect)
-        else:
-            csize = contents.size()
-
-        can_scroll = rect.height() < csize.height()
-        self._vsb_item.setVisible(can_scroll)
-        if can_scroll:
-            vscroll_max = csize.height() - page_height
-            vsb.setRange(0, int(vscroll_max))
-        else:
-            vsb.setRange(0, 0)
-        self._updateScrollPosition()
-        self._vsb_item.update()
-
-        constraint = QtCore.QSizeF(csize.width(), -1)
-        title = self._title_item
-        if title:
-            hsize = title.effectiveSizeHint(Qt.PreferredSize, constraint)
-            title.setGeometry(0, 0, csize.width(), hsize.height())
-        footer = self._footer_item
-        if footer:
-            fsize = footer.effectiveSizeHint(Qt.PreferredSize, constraint)
-            footer.setGeometry(0, rect.bottom() - fsize.height(),
-                               csize.width(), fsize.height())
-
-        self._updateTitleAndFooterVisibility()
-        self._updating_contents = False
-
-    # def update(self, *args, **kwargs):
-    #     self._updateContents()
-    #     super().update(*args, **kwargs)
-
-    def shouldShowTitle(self) -> bool:
-        header = self._title_item
-        if not header:
-            return False
-        if self._scroll_pos.y() < self._title_min_y:
-            return False
-        if target := self.titleTargetItem():
-            scroll_y = self._scroll_pos.y()
-            target_bottom = target.geometry().bottom() - scroll_y
-            header_bottom = header.geometry().bottom()
-            return target_bottom < header_bottom
-        return True
-
-    def shouldShowFooter(self) -> bool:
-        footer = self._footer_item
-        return bool(footer)
-
-    def _updateTitleAndFooterVisibility(self, animated=True):
-        animated = animated and not self.animationDisabled()
-        title = self._title_item
-        if title:
-            # Keep track of _title_shown instead of just checking if the title
-            # is currently visible, because it could be visible but already
-            # fading out
-            show_title = self.shouldShowTitle()
-            if animated and show_title and not self._title_shown:
-                title.fadeIn()
-            elif animated and self._title_shown and not show_title:
-                title.fadeOut()
-            else:
-                title.setVisible(show_title)
-            self._title_shown = show_title
-        footer = self._footer_item
-        if footer:
-            footer.setVisible(self.shouldShowFooter())
-
-    def wheelEvent(self, event: QtWidgets.QGraphicsSceneWheelEvent) -> None:
-        if self.scrollbarNeeded():
-            self.scene().sendEvent(self._vsb_item, event)
-            event.accept()
-        else:
-            parent = self.parentItem()
-            if parent:
-                parent.wheelEvent(event)
-
-    # def paint(self, painter: QtGui.QPainter,
-    #           option: QtWidgets.QStyleOptionGraphicsItem,
-    #           widget: Optional[QtWidgets.QWidget] = None) -> None:
-    #     r = self.rect()
-    #     painter.setPen(Qt.red)
-    #     painter.drawRect(r)
-    #     painter.setPen(Qt.green)
-    #     painter.drawRect(self.mapRectFromScene(self.viewportRect()))
+class UpdateReason(enum.Enum):
+    no_update = enum.auto()
+    scene_rect = enum.auto()
+    viewport = enum.auto()
+    resize = enum.auto()
+    model_change = enum.auto()
+    show = enum.auto()
+    settings = enum.auto()
+    remeasure = enum.auto()
+    wake = enum.auto()
 
 
 @graphictype("views.data_layout")
@@ -354,12 +45,18 @@ class DataLayoutGraphic(DataGraphic):
 
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
-        self._prev_size = QtCore.QSizeF(-1, -1)
-        self._scene_rect_changed = False
+        self._prev_scene_rect = QtCore.QRectF()
+        self._prev_viewport = QtCore.QRectF()
+        # self._prev_size = QtCore.QSizeF(-1, -1)
+        # self._scene_rect_changed = False
         self._hide_when_empty = False
         self._visible = True
         self._interactive = False
         self._hilite_row = -1
+        self._measure_data_ids: Sequence[models.DataID] = ()
+        self._measurements: dict[models.DataID, float] = {}
+        self._dynamic_item_width_expr: Optional[config.Expr] = None
+        self._value_font_map: dict[models.DataID, QtGui.QFont] = {}
 
         self._hilite = core.RectangleGraphic(self)
         self._hilite.setCornerRadius(4)
@@ -386,54 +83,128 @@ class DataLayoutGraphic(DataGraphic):
     #             graphic = self.itemForRow(row)
     #             controller.updateObjectFromModel(index, graphic)
 
-    def setGeometry(self, rect: QtCore.QRectF) -> None:
-        super().setGeometry(rect)
-        size = rect.size()
-        if self._scene_rect_changed or size != self._prev_size:
-            self._scene_rect_changed = False
-            self._prev_size = size
-            self._updateContents()
+    # def setGeometry(self, rect: QtCore.QRectF) -> None:
+    #     super().setGeometry(rect)
+    #     size = rect.size()
+    #     if self._scene_rect_changed or size != self._prev_size:
+    #         self._scene_rect_changed = False
+    #         self._prev_size = size
+    #         self._updateContents()
+
+    @settable("measure_values")
+    def setMeasureDataIDs(self, data_ids: Sequence[str | models.DataID]
+                          ) -> None:
+        model = self.model()
+        self._measure_data_ids = tuple(
+            models.specToDataID(model, spec) for spec in data_ids
+        )
+        self._remeasure()
+
+    @settable("dynamic_item_width")
+    def setDynamicItemWidthExpr(self, expr: str | dict | config.Expr) -> None:
+        if isinstance(expr, (str, dict)):
+            expr = config.PythonExpr.fromData(expr)
+        self._dynamic_item_width_expr = expr
+
+    @settable()
+    def setValueFontMap(self, value_font_map: dict[str, QtGui.QFont]) -> None:
+        self._value_font_map = value_font_map
+
+    def _remeasure(self) -> None:
+        if not self._measure_data_ids:
+            return
+
+        model = self.model()
+        font = self.font()
+        vfonts = {
+            models.specToDataID(model, spec):
+                converters.fontConverter(fd, font)
+            for spec, fd in self._value_font_map.items()
+        }
+
+        if not model:
+            return
+        count = model.rowCount()
+        if not count:
+            return
+
+        # print("measuring", self.objectName())
+        t = time.perf_counter()
+        for data_id in self._measure_data_ids:
+            vfont = vfonts[data_id]
+            fm = QtGui.QFontMetricsF(vfont)
+            max_w = 0.0
+            for row in range(count):
+                index = model.index(row, data_id.column)
+                text = index.data(data_id.role)
+                w = fm.horizontalAdvance(text)
+                max_w = max(max_w, w)
+            self._measurements[data_id] = max_w
+        # print(f"Measure {self.objectName()}: {time.perf_counter() - t:0.04f}")
+
+    def localEnv(self) -> dict[str, Any]:
+        env = super().localEnv()
+        env.update(
+            measured=self.valueMeasurement,
+        )
+        return env
+
+    def valueMeasurement(self, spec: str | models.DataID) -> float:
+        model = self.model()
+        if not model:
+            raise Exception(f"No model in {self}")
+        data_id = models.specToDataID(model, spec)
+        return self._measurements.get(data_id, 0.0)
 
     def itemChange(self, change: QtWidgets.QGraphicsItem.GraphicsItemChange,
                    value: Any) -> Any:
         if change == self.ItemScenePositionHasChanged:
-            self._updateContents()
+            self._updateView(UpdateReason.scene_rect)
         elif change == self.ItemSceneChange:
-            old_scene = self.scene()
-            if old_scene:
-                old_scene.sceneRectChanged.disconnect(self._onSceneRectChanged)
-            new_scene = cast(QtWidgets.QGraphicsScene, value)
-            new_scene.sceneRectChanged.connect(self._onSceneRectChanged)
+            self._invalidateCaches()
+            old = self.scene()
+            if old and isinstance(old, core.GraphicScene):
+                # old_scene.sceneRectChanged.disconnect(self._onSceneRectChanged)
+                old.viewportChanged.disconnect(self.viewportChanged)
+            if isinstance(value, core.GraphicScene):
+                # value.sceneRectChanged.connect(self._onSceneRectChanged)
+                value.viewportChanged.connect(self.viewportChanged)
         return super().itemChange(change, value)
 
-    def _onSceneRectChanged(self) -> None:
-        self._scene_rect_changed = True
-        self.updateGeometry()
-        # self._updateContents()
+    # def _onSceneRectChanged(self) -> None:
+    #     self._scene_rect_changed = True
+    #     self.updateGeometry()
+    #     # self._updateContents()
 
     def resizeEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
         super().resizeEvent(event)
         self.contentSizeChanged.emit()
+        self._updateView(UpdateReason.resize,
+                         anim_arrange=self._animate_resizing)
 
     def _rowsInserted(self, _: QtCore.QModelIndex, first: int, last: int
                       ) -> None:
         if self._hide_when_empty:
             self._updateVisibility()
+        self._remeasure()
         self.updateGeometry()
-        self._updateContents()
+        self._updateView(UpdateReason.model_change)
 
     def _rowsRemoved(self, _: QtCore.QModelIndex, first: int, last: int
                      ) -> None:
         if self._hide_when_empty:
             self._updateVisibility()
+        self._remeasure()
         self.updateGeometry()
-        self._updateContents()
+        self._updateView(UpdateReason.model_change)
 
     def _modelReset(self) -> None:
         if self._hide_when_empty:
             self._updateVisibility()
+        self._invalidateCaches()
+        self._remeasure()
         self.updateGeometry()
-        self._updateContents()
+        self._updateView(UpdateReason.model_change)
 
     def _rowDataChanged(self, start_row: int, end_row: int) -> None:
         model = self.model()
@@ -446,6 +217,11 @@ class DataLayoutGraphic(DataGraphic):
             if not graphic:
                 raise Exception(f"Update for nonexistant row {row}")
             controller.updateItemFromModel(model, row, self, graphic)
+
+        self._remeasure()
+
+    def _invalidateCaches(self):
+        self._prev_viewport = self._prev_scene_rect = QtCore.QRectF()
 
     @classmethod
     def templateKeys(cls) -> Sequence[str]:
@@ -460,9 +236,7 @@ class DataLayoutGraphic(DataGraphic):
             self._arrangement.setObjectName(f"{self.objectName()}__layout")
 
     def itemTemplates(self) -> dict[str, dict[str, Any]]:
-        return {
-            "item_template": self._item_template
-        }
+        return {"item_template": self._item_template}
 
     @settable("item_template")
     def setItemTemplate(self, template_data: dict[str, Any]):
@@ -472,7 +246,6 @@ class DataLayoutGraphic(DataGraphic):
 
     def setModel(self, model: Optional[QtCore.QAbstractItemModel]) -> None:
         super().setModel(model)
-        self._updateContents()
 
     @path_element(layouts.Arrangement, "layout")
     def arrangement(self) -> Optional[layouts.Arrangement]:
@@ -480,33 +253,51 @@ class DataLayoutGraphic(DataGraphic):
 
     def setArrangement(self, layout: layouts.Arrangement) -> None:
         if self._arrangement:
-            self._arrangement.invalidated.disconnect(self._updateContents)
+            self._arrangement.invalidated.disconnect(lambda: self._onLayoutChanged)
         self._arrangement = layout
-        self._arrangement.invalidated.connect(self._updateContents)
+        self._arrangement.invalidated.connect(self._onLayoutChanged)
+
+    def _onLayoutChanged(self):
+        self._updateView(UpdateReason.model_change)
 
     def _rowsMoved(self, _: QtCore.QModelIndex, src_start: int, src_end: int,
                    __: QtCore.QModelIndex, dest_start: int) -> None:
         print("Rows moved", src_start, src_end, "-", dest_start)
-        self._updateContents(anim_arrange=True)
+        self._updateView(UpdateReason.model_change, anim_arrange=True)
 
     def _layoutChanged(self) -> None:
         print("Layout changed")
-        self._updateContents(anim_arrange=True, anim_repop=True)
+        self._updateView(UpdateReason.model_change, anim_arrange=True, anim_repop=True)
 
     # def setGeometry(self, rect: QtCore.QRectF) -> None:
     #     super().setGeometry(rect)
     #     self._updateContents(anim_arrange=self._animate_resizing)
 
-    def resizeEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
-        super().resizeEvent(event)
-        self._updateContents(anim_arrange=self._animate_resizing)
+    def awaken(self) -> None:
+        super().awaken()
+        self._updateView(UpdateReason.wake)
 
-    def _updateContents(self, *, anim_arrange=False, anim_repop=False,
-                        ) -> None:
-        # t = perf_counter()
-        # self.prepareGeometryChange()
+    def _updateView(self, reason: UpdateReason, *, anim_arrange=False,
+                    anim_repop=False) -> None:
+        scene = self.scene()
+        if reason not in (UpdateReason.resize, UpdateReason.wake) and \
+                not (scene and scene.isActive() and self.isVisible()):
+            return
         if self._laying_out:
             return
+
+        sr = self.mapRectToScene(self.rect())
+        vp = self.viewportRect()
+        if reason == UpdateReason.scene_rect and sr == self._prev_scene_rect:
+            return
+        if reason == UpdateReason.viewport and vp == self._prev_viewport:
+            return
+        self._prev_scene_rect = sr
+        self._prev_viewport = vp
+
+        # t = perf_counter()
+        # self.prepareGeometryChange()
+        # print("update", self.objectName(), reason, self.viewportRect())
         self._laying_out = True
         animated = not self.animationDisabled()
         anim_arrange = anim_arrange and animated
@@ -528,16 +319,17 @@ class DataLayoutGraphic(DataGraphic):
             return hint
         return constraint
 
-    def _updateChildren(self, *, anim_arrange=False):
-        self.arrangement().layoutItems(self.rect(),
-                                       list(self.childGraphics()),
-                                       animated=anim_arrange)
+    # def _updateChildren(self, *, anim_arrange=False):
+    #     self.arrangement().layoutItems(self.rect(),
+    #                                    list(self.childGraphics()),
+    #                                    animated=anim_arrange)
 
     def _updateDataContents(self, *, anim_arrange=False, anim_repop=False):
         all_keys = set(self._items)
         live_keys: set[str] = set()
         old_items = self._items
         new_items: dict[int|str, Graphic] = {}
+        local_env = self.localEnv()
         for row_num in range(self.rowCount()):
             key = self._keyForRow(row_num)
             live_keys.add(key)
@@ -545,9 +337,9 @@ class DataLayoutGraphic(DataGraphic):
             if item:
                 item.setOpacity(1.0)
                 item.show()
-                self._updateItemFromModel(item, row_num)
+                self._updateItemFromModel(item, row_num, local_env=local_env)
             else:
-                item = self._makeItem(key, row_num)
+                item = self._makeItem(key, row_num, local_env=local_env)
                 item.show()
                 if anim_repop:
                     item.fadeIn()
@@ -602,7 +394,7 @@ class DataLayoutGraphic(DataGraphic):
         key = self._keyForRow(row_num)
         item = self._items.get(key)
         if create and not item:
-            item = self._makeItem(key, row_num)
+            item = self._makeItem(key, row_num, local_env=self.localEnv())
         return item
 
     def liveItems(self) -> Iterable[Graphic]:
@@ -619,9 +411,11 @@ class DataLayoutGraphic(DataGraphic):
         graphic.setZValue(1)
         return graphic
 
-    def _updateItemFromModel(self, graphic: Graphic, row: int):
+    def _updateItemFromModel(self, graphic: Graphic, row: int,
+                             local_env: dict[str, Any]):
         model = self.model()
-        self.controller().updateItemFromModel(model, row, self, graphic)
+        self.controller().updateItemFromModel(model, row, self, graphic,
+                                              extra_env=local_env)
         key_value = self._keyForRow(row)
         graphic.setData(ITEM_KEY_VALUE, key_value)
         graphic.setData(ITEM_ROW_NUM, row)
@@ -629,14 +423,15 @@ class DataLayoutGraphic(DataGraphic):
         graphic.setLocalVariable("unique_id", key_value)
         graphic.setObjectName(f"{model.objectName()}_{row}")
 
-    def _makeItem(self, key: Union[int, str], row: int) -> Graphic:
+    def _makeItem(self, key: Union[int, str], row: int,
+                  local_env: dict[str, Any]) -> Graphic:
         graphic = self._makeItemFromScratch(key, row)
-        self._updateItemFromModel(graphic, row)
+        self._updateItemFromModel(graphic, row, local_env=local_env)
         self._items[key] = graphic
         return graphic
 
     def showEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
-        self._updateContents()
+        self._updateView(UpdateReason.show)
 
     def isInteractive(self) -> bool:
         return self._interactive
@@ -730,9 +525,16 @@ class DataListGraphic(DataLayoutGraphic):
         self._pool: list[Graphic] = []
         self._populated = False
         self._display_margin = 40.0
+        self._prewarm_count = 0
+        self._prewarm_batch_size = 25
+        self._prewarm_batch_delay = 250
+        self._batch_timer: Optional[QtCore.QTimer] = None
 
         self.setHasHeightForWidth(True)
         self.setFlag(self.ItemSendsScenePositionChanges, True)
+
+    def viewportChanged(self) -> None:
+        self._updateSections(UpdateReason.viewport)
 
     @classmethod
     def templateKeys(cls) -> Sequence[str]:
@@ -768,37 +570,53 @@ class DataListGraphic(DataLayoutGraphic):
                 new_sect = self._sectionForRow(row)
                 sections_dirty = old_sect != new_sect
 
+        self._remeasure()
         if has_sections and sections_dirty:
             # TODO: just move the changed rows, instead of recomputing all
-            self._updateSections(update_contents=True)
+            self._updateSections(UpdateReason.model_change,
+                                 update_contents=True)
 
     def _modelReset(self) -> None:
         self.prepareGeometryChange()
         self._populated = False
-        self._updateSections(update_contents=True)
+        self._remeasure()
+        self._invalidateCaches()
+        self._updateSections(UpdateReason.model_change, update_contents=True)
         self.updateGeometry()
 
     def _rowsInserted(self, _: QtCore.QModelIndex, first: int, last: int
                       ) -> None:
         self.prepareGeometryChange()
-        self._updateSections(repopulating=self._populated, update_contents=True)
+        self._remeasure()
+        self._updateSections(UpdateReason.model_change,
+                             repopulating=self._populated, update_contents=True)
         self._populated = True
         self.updateGeometry()
 
     def _rowsRemoved(self, _: QtCore.QModelIndex, first: int, last: int
                      ) -> None:
         self.prepareGeometryChange()
-        self._updateSections(repopulating=True, update_contents=True)
+        self._remeasure()
+        self._updateSections(UpdateReason.model_change, repopulating=True,
+                             update_contents=True)
         self.updateGeometry()
 
     # def setPos(self, pos: QtCore.QPointF) -> None:
     #     super().setPos(pos)
     #     self._updateContents()
 
+    def localEnv(self) -> dict[str, Any]:
+        env = super().localEnv()
+        env.update(
+            col_width=self._col_width,
+            row_height=self._arrangement.rowHeight(),
+        )
+        return env
+
     @settable(argtype=bool)
     def setUseSections(self, use_sections: bool) -> None:
         self._use_sections = use_sections
-        self._updateContents()
+        self._updateView(UpdateReason.settings)
 
     def sectionDataID(self) -> models.DataID:
         return self._section_data_id
@@ -809,11 +627,11 @@ class DataListGraphic(DataLayoutGraphic):
         model = self.model()
         self._section_data_id = models.specToDataID(model, spec)
         if self.hasSections():
-            self._updateSections(update_contents=True)
+            self._updateSections(UpdateReason.settings, update_contents=True)
         else:
             self._headings.clear()
             self._section_rows.clear()
-            self._updateContents()
+            self._updateView(UpdateReason.settings)
 
     def hasSections(self) -> bool:
         return self._use_sections and bool(self.sectionDataID())
@@ -824,8 +642,48 @@ class DataListGraphic(DataLayoutGraphic):
     @settable()
     def setReuseItems(self, reuse: bool) -> None:
         self._reuse_items = reuse
-        if not reuse:
+        if reuse:
+            self._prewarmPool()
+        else:
             self._pool.clear()
+
+    @settable("item_template")
+    def setItemTemplate(self, template_data: dict[str, Any]):
+        super().setItemTemplate(template_data)
+        self._pool.clear()
+        self._prewarmPool()
+
+    @settable("prewarm")
+    def setPrewarmPoolSize(self, count: int) -> None:
+        self._prewarm_count = count
+        self._prewarmPool()
+
+    def _prewarmBatchTimer(self) -> QtCore.QTimer:
+        if self._batch_timer is None:
+            self._batch_timer = QtCore.QTimer()
+            self._batch_timer.timeout.connect(self._prewarmPool)
+            self._batch_timer.setInterval(self._prewarm_batch_delay)
+            self._batch_timer.setSingleShot(True)
+        return self._batch_timer
+
+    def _availableItems(self) -> int:
+        return len(self._items) + len(self._pool)
+
+    def _prewarmPool(self) -> None:
+        if not self._item_template or not self._reuse_items:
+            return
+        target = self._prewarm_count
+        avail = self._availableItems()
+        if target > avail:
+            batch_target = min(target, avail + self._prewarm_batch_size)
+            # t = time.perf_counter()
+            for _ in range(avail, batch_target):
+                item = self._makeItemFromScratch(0, 0)
+                self._pool.append(item)
+            # print("Prewarm", self.objectName(), batch_target, target,
+            #       time.perf_counter() - t)
+            if self._availableItems() < target:
+                self._prewarmBatchTimer().start()
 
     def headingTemplate(self) -> dict[str, Any]:
         return self._heading_template
@@ -839,17 +697,34 @@ class DataListGraphic(DataLayoutGraphic):
     @settable("h_space")
     def setHorizontalSpacing(self, hspace: float):
         self.matrix().setHorizontalSpacing(hspace)
-        self._updateContents()
+        self._updateView(UpdateReason.settings)
 
     @settable("v_space")
     def setVerticalSpacing(self, vspace: float):
         self.matrix().setVerticalSpacing(vspace)
-        self._updateContents()
+        self._updateView(UpdateReason.settings)
 
     @settable()
     def setSpacing(self, space: float):
         self.matrix().setSpacing(space)
-        self._updateContents()
+        self._updateView(UpdateReason.settings)
+
+    def _remeasure(self) -> None:
+        super()._remeasure()
+        if self._dynamic_item_width_expr:
+            value = self._evaluateExpr(self._dynamic_item_width_expr)
+            matrix = self.matrix()
+            if value and value != matrix.minimumColumnWidth():
+                matrix.setMinimumColumnWidth(value)
+                self._updateView(UpdateReason.remeasure)
+
+    # def dataModel(self) -> models.DataModel:
+    #     model = self.model()
+    #     if isinstance(model, QtCore.QSortFilterProxyModel):
+    #         model = model.sourceModel()
+    #     if not isinstance(model, models.DataModel):
+    #         raise TypeError(f"Can't set measure columns on {model}")
+    #     return model
 
     def matrix(self) -> layouts.Matrix:
         return self.arrangement()
@@ -863,7 +738,7 @@ class DataListGraphic(DataLayoutGraphic):
     @settable(argtype=QtCore.QMarginsF)
     def setMargins(self, ms: QtCore.QMarginsF) -> None:
         self.matrix().setMargins(ms)
-        self._updateContents()
+        self._updateView(UpdateReason.settings)
 
     def heightForWidth(self, width: float) -> float:
         count = self.rowCount()
@@ -911,7 +786,8 @@ class DataListGraphic(DataLayoutGraphic):
         self._items.clear()
         self._collectItems()
 
-    def _makeItem(self, key: Union[int, str], row: int) -> Graphic:
+    def _makeItem(self, key: Union[int, str], row: int,
+                  local_env: dict[str, Any]) -> Graphic:
         graphic: Optional[Graphic] = None
         if self._reuse_items:
             # Try re-using an item from the cache, otherwise create a new one
@@ -927,7 +803,7 @@ class DataListGraphic(DataLayoutGraphic):
             graphic = self._makeItemFromScratch(key, row)
 
         graphic.setHighlighted(False)
-        self._updateItemFromModel(graphic, row)
+        self._updateItemFromModel(graphic, row, local_env=local_env)
         self._items[key] = graphic
         return graphic
 
@@ -945,7 +821,7 @@ class DataListGraphic(DataLayoutGraphic):
 
     def setDisplayMargin(self, margin: float) -> None:
         self._display_margin = margin
-        self._updateContents()
+        self._updateView(UpdateReason.settings)
 
     def extraRect(self, rect: QtCore.QRectF) -> QtCore.QRectF:
         rect = QtCore.QRectF(rect)
@@ -956,7 +832,8 @@ class DataListGraphic(DataLayoutGraphic):
                 rect.setY(0)
         return rect
 
-    def _updateSections(self, *, repopulating=False, update_contents=True):
+    def _updateSections(self, reason: UpdateReason, *, repopulating=False,
+                        update_contents=True) -> None:
         self._updateVisibility()
         if self.hasSections():
             old_headings = self._headings
@@ -992,7 +869,7 @@ class DataListGraphic(DataLayoutGraphic):
                 item.setParentItem(None)
 
         if update_contents:
-            self._updateContents(anim_repop=repopulating)
+            self._updateView(reason, anim_repop=repopulating)
 
     def sectionKeyValues(self) -> Sequence[int|str]:
         return tuple(self._section_rows.keys())
@@ -1012,7 +889,8 @@ class DataListGraphic(DataLayoutGraphic):
         if self.scene() is None:
             return
         rect = self.rect()
-        vp_rect = self.viewportRect()
+        vp_rect = self.viewportRect()  # In scene coordinates
+        # print("  ", self.objectName(), "vp=", vp_rect)
         if not vp_rect.isValid():
             return
         vis_rect = self.mapRectFromScene(vp_rect)
@@ -1020,7 +898,7 @@ class DataListGraphic(DataLayoutGraphic):
 
         has_sections = self.hasSections()
         if has_sections and not self._headings:
-            self._updateSections(update_contents=False)
+            self._updateSections(UpdateReason.no_update, update_contents=False)
 
         existing_keys = set(self._items)
         # print("  existing_keys=", len(existing_keys))
@@ -1037,7 +915,7 @@ class DataListGraphic(DataLayoutGraphic):
             self._updateItems(visible_row_nums, self.rowCount(),
                               vis_rect, live_keys, QtCore.QPointF(),
                               anim_arrange=anim_arrange, anim_repop=anim_repop)
-        # print("  live_keys=", len(live_keys))
+        # print(self.objectName(), "live_keys=", len(live_keys))
         self._recycleKeys(existing_keys - live_keys, anim_repop=anim_repop)
         # print(f"_uDC= {self.objectName()} {time.perf_counter() - t:0.04f}")
 
@@ -1098,6 +976,7 @@ class DataListGraphic(DataLayoutGraphic):
                      anim_arrange=False, anim_repop=False) -> None:
         matrix = self.matrix()
         width = self.size().width()
+        local_env = self.localEnv()
 
         for i in visible_indices:
             if row_number_lookup:
@@ -1119,7 +998,7 @@ class DataListGraphic(DataLayoutGraphic):
                 else:
                     item.setGeometry(rect)
             else:
-                item = self._makeItem(key, row_number)
+                item = self._makeItem(key, row_number, local_env=local_env)
                 item.setGeometry(rect)
                 item.show()
                 item.setOpacity(1.0)
@@ -1141,7 +1020,7 @@ class DataListGraphic(DataLayoutGraphic):
 
 
 @graphictype("views.scrolling_list")
-class ListView(ScrollGraphic):
+class ListView(containers.ScrollGraphic):
     contentSizeChanged = QtCore.Signal()
 
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):

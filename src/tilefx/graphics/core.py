@@ -1,5 +1,6 @@
 from __future__ import annotations
 import pathlib
+import time
 from collections import defaultdict
 from typing import (Any, Callable, Collection, Iterable,
                     Optional, Sequence, TypeVar, Union)
@@ -7,7 +8,7 @@ from typing import (Any, Callable, Collection, Iterable,
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
 
-from .. import colorutils, config, converters, models, themes
+from .. import colorutils, config, converters, models, themes, util
 from ..config import settable
 
 
@@ -154,8 +155,10 @@ def dataProxyFor(obj: QtCore.QObject) -> QtCore.QObject:
 
 
 class GraphicScene(QtWidgets.QGraphicsScene):
+    viewportChanged = QtCore.Signal()
     rootChanged = QtCore.Signal()
     linkActivated = QtCore.Signal(str)
+    contentSizeChanged = QtCore.Signal()
 
     def __init__(self, parent: QtCore.QObject = None):
         super().__init__(parent)
@@ -166,8 +169,11 @@ class GraphicScene(QtWidgets.QGraphicsScene):
         self._controller: Optional[config.DataController] = None
 
         # c = QtGui.QColor("#63D0DF")  # "#63D0DF" #D0BCFF
-        hct = colorutils.Color("hct", [282, 48, 25])
-        self._color_theme = themes.ColorTheme.fromHct(hct)
+        theme_hct = colorutils.Color("hct", [282, 48, 25])
+        highlight_hct = themes.qcolor_to_hct(QtGui.QColor("#C7FF00"))
+        self._color_theme = themes.ColorTheme.fromHct(
+            theme_hct, highlight_hct=highlight_hct
+        )
         self._theme_palette = self._color_theme.themePalette()
         self.setPalette(self._theme_palette.qtPalette())
 
@@ -176,6 +182,7 @@ class GraphicScene(QtWidgets.QGraphicsScene):
         # event.accept()
 
     def linkClicked(self, url: str) -> None:
+        # print("link clicked=", url)
         self.linkActivated.emit(url)
 
     def rootGraphic(self) -> Optional[Graphic]:
@@ -187,12 +194,17 @@ class GraphicScene(QtWidgets.QGraphicsScene):
 
         old_root = self._root
         if old_root:
+            old_root.contentSizeChanged.disconnect(self.contentSizeChanged)
             self.removeItem(old_root)
             # old_root.deleteLater()
 
+        root.contentSizeChanged.connect(self.contentSizeChanged)
         self._root = root
         self.addItem(root)
         self.rootChanged.emit()
+
+    def notifyViewportChanged(self) -> None:
+        self.viewportChanged.emit()
 
     def controller(self) -> Optional[config.DataController]:
         return self._controller
@@ -214,11 +226,17 @@ class GraphicScene(QtWidgets.QGraphicsScene):
         self.loadTemplate(self._template_path, force=True)
 
     def setTemplate(self, template_data: dict[str, Any]) -> None:
-        root = rootFromTemplate(template_data, self.controller())
+        root = rootFromTemplate(template_data, self.controller(), self)
         self.setRootGraphic(root)
 
     def colorTheme(self) -> themes.ColorTheme:
         return self._color_theme
+
+    def setColorTheme(self, theme: themes.ColorTheme) -> None:
+        self._color_theme = theme
+        self._theme_palette = theme.themePalette()
+        self.setPalette(self._theme_palette.qtPalette())
+        self.update()
 
     def themeColor(self) -> QtGui.QColor:
         return self.colorTheme().theme_qcolor
@@ -229,12 +247,6 @@ class GraphicScene(QtWidgets.QGraphicsScene):
 
     def themePalette(self) -> themes.ThemePalette:
         return self._theme_palette
-
-    def setColorTheme(self, theme: themes.ColorTheme) -> None:
-        self._color_theme = theme
-        self._theme_palette = theme.themePalette()
-        self.setPalette(self._theme_palette.qtPalette())
-        self.update()
 
     def drawBackground(self, painter: QtGui.QPainter,
                        rect: QtCore.QRectF) -> None:
@@ -303,6 +315,9 @@ class Graphic(QtWidgets.QGraphicsWidget):
 
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
+        self._implicit_size: Optional[QtCore.QSizeF] = None
+        self._fixed_width: Optional[float] = None
+        self._fixed_height: Optional[float] = None
         self._color_theme: Optional[themes.ColorTheme] = None
         self._theme_palette: Optional[themes.ThemePalette] = None
         self._local_env: Optional[dict[str, Any]] = None
@@ -340,6 +355,8 @@ class Graphic(QtWidgets.QGraphicsWidget):
     def fromData(cls, data: dict[str, Any], parent: Graphic = None,
                  controller: config.DataController = None) -> Graphic:
         graphic: Graphic = cls(parent=parent)
+        if "name" in data:
+            graphic.setObjectName(data.pop("name"))
         if parent:
             parent.prepChild(graphic, data)
         graphic.configureFromData(data, controller)
@@ -406,6 +423,13 @@ class Graphic(QtWidgets.QGraphicsWidget):
 
     def model(self) -> QtCore.QAbstractItemModel:
         return self._model
+
+    def viewportChanged(self) -> None:
+        pass
+
+    def awaken(self) -> None:
+        for child in self.childGraphics():
+            child.awaken()
 
     def setHasHeightForWidth(self, hfw: bool) -> None:
         sp = self.sizePolicy()
@@ -511,6 +535,7 @@ class Graphic(QtWidgets.QGraphicsWidget):
         return [c.objectName() for c in self.childItems() if c.objectName()]
 
     def parentViewportRect(self) -> QtCore.QRectF:
+        from .widgets import GraphicView
         # This must return the visible rect in SCENE coordinates
         parent = self.parentGraphic()
         if parent:
@@ -518,12 +543,27 @@ class Graphic(QtWidgets.QGraphicsWidget):
         else:
             scene = self.scene()
             if scene:
-                return scene.sceneRect()
+                for view in scene.views():
+                    if isinstance(view, GraphicView):
+                        return view.viewportRect()
+                    else:
+                        return view.sceneRect()
+                else:
+                    return scene.sceneRect()
             return QtCore.QRectF()
 
     def viewportRect(self) -> QtCore.QRectF:
         # This must return the visible rect in SCENE coordinates
         return self.parentViewportRect()
+
+    def hasImplicitSize(self) -> bool:
+        return self._implicit_size is not None
+
+    def implicitSize(self) -> QtCore.QSizeF:
+        if self._implicit_size:
+            return QtCore.QSizeF(self._implicit_size)
+        else:
+            raise AttributeError(f"{self} has no implicit size")
 
     def anchorLayout(self) -> QtWidgets.QGraphicsAnchorLayout:
         layout = self.layout()
@@ -563,7 +603,8 @@ class Graphic(QtWidgets.QGraphicsWidget):
             env= extra
         return env
 
-    def _evaluateExpr(self, expr: Optional[config.PythonExpr]) -> Any:
+    def _evaluateExpr(self, expr: Optional[config.Expr],
+                      extra_env: dict[str, Any] = None) -> Any:
         if not expr:
             return
 
@@ -575,6 +616,8 @@ class Graphic(QtWidgets.QGraphicsWidget):
         env.update(self.scopedVariables())
         env["self"] = self
         env["controller"] = controller
+        if extra_env:
+            env.update(extra_env)
         return expr.evaluate(None, env)
 
     def dataProxy(self) -> Optional[Graphic]:
@@ -594,9 +637,7 @@ class Graphic(QtWidgets.QGraphicsWidget):
         return self.childGraphics()
 
     def animationDisabled(self) -> bool:
-        return (self._animation_disabled or
-                not self.isVisible() or
-                sceneAnimationDisabled(self.scene()))
+        return not self.isVisible() or sceneAnimationDisabled(self.scene())
 
     def setAnimationDisabled(self, disabled: bool) -> None:
         self._animation_disabled = disabled
@@ -656,6 +697,9 @@ class Graphic(QtWidgets.QGraphicsWidget):
 
     @settable("fixed_width")
     def setFixedWidth(self, width: float):
+        self._fixed_width = width
+        if self._fixed_height is not None:
+            self._implicit_size = QtCore.QSizeF(width, self._fixed_height)
         self.prepareGeometryChange()
         super().setPreferredWidth(width)
         super().setMinimumWidth(width)
@@ -664,6 +708,9 @@ class Graphic(QtWidgets.QGraphicsWidget):
 
     @settable("fixed_height")
     def setFixedHeight(self, height: float):
+        self._fixed_height = height
+        if self._fixed_width is not None:
+            self._implicit_size = QtCore.QSizeF(self._fixed_width, height)
         self.prepareGeometryChange()
         super().setPreferredHeight(height)
         super().setMinimumHeight(height)
@@ -672,6 +719,7 @@ class Graphic(QtWidgets.QGraphicsWidget):
 
     @settable("fixed_size", argtype=QtCore.QSizeF)
     def setFixedSize(self, size: QtCore.QSizeF) -> None:
+        self._implicit_size = QtCore.QSizeF(size)
         self.prepareGeometryChange()
         super().setPreferredSize(size)
         super().setMinimumSize(size)
@@ -1030,11 +1078,47 @@ settable("min_width")(Graphic.setMinimumWidth)
 settable("min_height")(Graphic.setMinimumHeight)
 settable("max_width")(Graphic.setMaximumWidth)
 settable("max_height")(Graphic.setMaximumHeight)
-settable("width")(Graphic.setPreferredWidth)
-settable("height")(Graphic.setPreferredHeight)
-settable("size", argtype=QtCore.QSizeF)(Graphic.setPreferredSize)
+settable("preferred_width")(Graphic.setPreferredWidth)
+settable("preferred_height")(Graphic.setPreferredHeight)
+settable("preferred_size", argtype=QtCore.QSizeF)(Graphic.setPreferredSize)
 settable("min_size", argtype=QtCore.QSizeF)(Graphic.setMinimumSize)
 settable("max_size", argtype=QtCore.QSizeF)(Graphic.setMaximumSize)
+settable("size", argtype=QtCore.QSizeF)(Graphic.resize)
+
+
+def graphicFromData(data: dict[str, Any], parent: Graphic = None,
+                    controller: config.DataController = None,
+                    scene: GraphicScene = None) -> Graphic:
+    # Make a copy of the data dict so we can pop keys off and not affect
+    # the caller
+    data = data.copy()
+    typename = data.pop("type", "text")
+    try:
+        graphic_class = graphic_class_registry[typename]
+    except KeyError:
+        raise Exception(f"Unknown tile type: {typename!r}")
+    if not issubclass(graphic_class, Graphic):
+        raise TypeError(f"Class {graphic_class} is not a subclass of Graphic")
+
+    graphic = graphic_class.fromData(data, parent=parent, controller=controller)
+    if scene:
+        scene.addItem(graphic)
+
+    size = graphic.effectiveSizeHint(Qt.PreferredSize, QtCore.QSizeF(-1, -1))
+    if size.isValid():
+        graphic.resize(size)
+
+    return graphic
+
+
+def rootFromTemplate(data: dict[str, Any], controller: config.DataController,
+                     scene: GraphicScene) -> Graphic:
+    if not controller:
+        raise Exception("No controller")
+    controller.clear()
+    graphic = graphicFromData(data, controller=controller, scene=scene)
+    controller.setRoot(graphic)
+    return graphic
 
 
 class AreaGraphic(Graphic):
@@ -1256,9 +1340,7 @@ class RectangleGraphic(AreaGraphic):
         self._shape = shape
         self.update()
 
-    def paint(self, painter: QtGui.QPainter,
-              option: QtWidgets.QStyleOptionGraphicsItem,
-              widget: Optional[QtWidgets.QWidget] = None) -> None:
+    def _paintRectangle(self, painter: QtGui.QPainter) -> None:
         rect = self.rect()
         if self._hilite_value:
             hi_val = self._hiliteVal()
@@ -1288,6 +1370,11 @@ class RectangleGraphic(AreaGraphic):
                 painter.drawRoundedRect(rect, radius, radius)
             else:
                 painter.drawRect(rect)
+
+    def paint(self, painter: QtGui.QPainter,
+              option: QtWidgets.QStyleOptionGraphicsItem,
+              widget: Optional[QtWidgets.QWidget] = None) -> None:
+        self._paintRectangle(painter)
 
 
 class ClickableGraphic(RectangleGraphic):
@@ -1395,6 +1482,311 @@ class ClickableGraphic(RectangleGraphic):
     #           widget: Optional[QtWidgets.QWidget] = None) -> None:
     #     painter.setPen(Qt.green)
     #     painter.drawRect(self.rect())
+
+
+FieldValue = Union[config.Expr, str, int, float]
+
+
+class UnresolvedAnchor(Exception):
+    pass
+
+
+class FieldAdapter:
+    attr_names = ("left", "top", "right", "bottom", "h_center", "v_center",
+                  "width", "height")
+
+    def __init__(self, item: Optional[Graphic],
+                 resolved: dict[Qt.AnchorPoint, float] = None):
+        self._item = item
+        self._resolved: dict[Qt.AnchorPoint, float] = {}
+        if resolved:
+            self._resolved.update(resolved)
+
+        self._size: Optional[QtCore.QSizeF] = None
+        self._width: Optional[float] = None
+        self._height: Optional[float] = None
+        if item and item.hasImplicitSize():
+            self._size = item.implicitSize()
+            self._width = self._size.width()
+            self._height = self._size.height()
+
+    @classmethod
+    def fromRect(cls, rect: QtCore.QRectF) -> FieldAdapter:
+        return FieldAdapter(None, {
+            Qt.AnchorLeft: rect.left(),
+            Qt.AnchorTop: rect.top(),
+            Qt.AnchorRight: rect.right(),
+            Qt.AnchorBottom: rect.bottom(),
+            Qt.AnchorHorizontalCenter: rect.center().x(),
+            Qt.AnchorVerticalCenter: rect.center().y(),
+        })
+
+    @property
+    def width(self) -> float:
+        if self._size:
+            return self._width
+        resolved = self._resolved
+        if Qt.AnchorLeft in resolved and Qt.AnchorRight in resolved:
+            return resolved[Qt.AnchorRight] - resolved[Qt.AnchorLeft]
+        else:
+            raise UnresolvedAnchor(f"{self._item.objectName()}.width")
+
+    @property
+    def height(self) -> float:
+        if self._size:
+            return self._height
+        resolved = self._resolved
+        if Qt.AnchorTop in resolved and Qt.AnchorBottom in resolved:
+            return resolved[Qt.AnchorBottom] - resolved[Qt.AnchorTop]
+        else:
+            raise UnresolvedAnchor(f"{self._item.objectName()}.height")
+
+    def __getattr__(self, name: str) -> float:
+        anchor = converters.anchorPointConverter(name)
+        size = self._size
+        resolved = self._resolved
+
+        if anchor in resolved:
+            return resolved[anchor]
+
+        # if we don't have explicit center points set, we can infer them if
+        # we know the edges
+        if anchor == Qt.AnchorHorizontalCenter and anchor not in resolved:
+            if Qt.AnchorTop in resolved and Qt.AnchorBottom in resolved:
+                top = resolved[Qt.AnchorTop]
+                bot = resolved[Qt.AnchorBottom]
+                return top + bot / 2
+        elif anchor == Qt.AnchorHorizontalCenter and anchor not in resolved:
+            if Qt.AnchorLeft in resolved and Qt.AnchorRight in resolved:
+                left = resolved[Qt.AnchorLeft]
+                right = resolved[Qt.AnchorRight]
+                return left + right / 2
+
+        # If the item has a known size, we can resolve edges opposite from the
+        # size and a parallel edge
+        if size:
+            if anchor == Qt.AnchorRight:
+                if Qt.AnchorLeft in resolved:
+                    return resolved[Qt.AnchorLeft] + self._width
+                elif Qt.AnchorHorizontalCenter in resolved:
+                    return resolved[Qt.AnchorHorizontalCenter] + size.width() / 2
+            elif anchor == Qt.AnchorLeft:
+                if Qt.AnchorRight in resolved:
+                    return resolved[Qt.AnchorRight] - self._width
+                elif Qt.AnchorHorizontalCenter in resolved:
+                    return resolved[Qt.AnchorHorizontalCenter] - size.width() / 2
+            elif anchor == Qt.AnchorBottom:
+                if Qt.AnchorTop in resolved:
+                    return resolved[Qt.AnchorTop] + self._height
+                elif Qt.AnchorVerticalCenter in resolved:
+                    return resolved[Qt.AnchorVerticalCenter] + size.height() / 2
+            elif anchor == Qt.AnchorTop:
+                if Qt.AnchorBottom in resolved:
+                    return resolved[Qt.AnchorBottom] - self._height
+                elif Qt.AnchorVerticalCenter in resolved:
+                    return resolved[Qt.AnchorVerticalCenter] - size.height() / 2
+            elif anchor == Qt.AnchorHorizontalCenter:
+                if Qt.AnchorLeft in resolved:
+                    return resolved[Qt.AnchorLeft] + self._width / 2
+                elif Qt.AnchorRight in resolved:
+                    return resolved[Qt.AnchorRight] - self._width / 2
+            elif anchor == Qt.AnchorVerticalCenter:
+                if Qt.AnchorTop in resolved:
+                    return resolved[Qt.AnchorTop] + self._height / 2
+                elif Qt.AnchorBottom in resolved:
+                    return resolved[Qt.AnchorBottom] - self._height / 2
+
+        raise UnresolvedAnchor(f"{self._item.objectName()}.{name}")
+
+    def set(self, anchor: str | Qt.AnchorPoint, value: float) -> None:
+        if isinstance(anchor, str):
+            anchor = converters.anchor_points[anchor]
+        self._resolved[anchor] = value
+
+    def toRect(self) -> QtCore.QRectF:
+        if Qt.AnchorLeft not in self._resolved:
+            self._resolved[Qt.AnchorLeft] = 0.0
+        if Qt.AnchorTop not in self._resolved:
+            self._resolved[Qt.AnchorTop] = 0.0
+
+        left = self.left
+        top = self.top
+        right = max(left, self.right)
+        bottom = max(top, self.bottom)
+        r = QtCore.QRectF(left, top, right - left, bottom - top)
+        if not r.size().isValid():
+            # print("resolved=", self._resolved)
+            # print("x=", left, "y=", top, "r=", right, "b=", bottom,
+            #       "w=", r.width(), "h=", r.height())
+            raise Exception(f"Invalid rectangle {r} "
+                            f"for {self._item.objectName()!r}")
+        return r
+
+
+@graphictype("field")
+class FieldGraphic(RectangleGraphic):
+    _anchor_to_name = util.invertedDict(converters.anchor_points)
+
+    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
+        super().__init__(parent)
+        self._exprs: dict[tuple[str, Qt.AnchorPoint], config.PythonExpr] = {}
+        self._knowns: dict[str, dict[Qt.AnchorPoint, float]] = {}
+        self._manual_order: Optional[Sequence[tuple[str, Qt.AnchorPoint]]] = None
+        self._order: Optional[Sequence[tuple[str, Qt.AnchorPoint]]] = None
+
+    # def _computeResolutionOrder(self) -> Sequence[tuple[str, str]]:
+    #     dg: util.DependencyGraph[tuple[str, str]] = util.DependencyGraph()
+    #
+    #     prev_mo: Optional[tuple[str, str]] = None
+    #     for mo in self._manual_order:
+    #         if isinstance(mo, str):
+    #             mo = tuple(mo.split(".", 1))
+    #         elif not isinstance(mo, tuple):
+    #             raise TypeError(f"Can't use {mo} in resolution order")
+    #         dg.add(mo)
+    #         if prev_mo:
+    #             dg.depends_on(prev_mo, mo)
+    #         prev_mo = mo
+    #
+    #     obj_names = set(obj.objectName() for obj in self.childGraphics()
+    #                     if obj.objectName())
+    #     for obj_name in obj_names:
+    #         exprs = self._exprs[obj_name]
+    #         for anchor, expr in exprs.items():
+    #             if not isinstance(expr, config.PythonExpr):
+    #                 continue
+    #             anchor_name = self._anchor_to_name[anchor]
+    #             from_attr = (obj_name, anchor_name)
+    #             dg.add(from_attr)
+    #             parsed = ast.parse(expr.source)
+    #             for node in ast.walk(parsed):
+    #                 if isinstance(node, ast.Attribute) and node.ctx == ast.Load:
+    #                     lhs = node.value
+    #                     if not isinstance(lhs, ast.Name):
+    #                         continue
+    #                     if lhs.id not in obj_names:
+    #                         continue
+    #                     if node.attr not in FieldAdapter.attr_names:
+    #                         continue
+    #                     if node.attr == "width":
+    #                         to_add = [(lhs.id, "left"), (lhs.id, "right")]
+    #                     elif node.attr == "height":
+    #                         to_add = [(lhs.id, "top"), (lhs.id, "bottom")]
+    #                     else:
+    #                         to_add = [(lhs.id, node.attr)]
+    #                     for to_attr in to_add:
+    #                         dg.add(to_attr)
+    #                         dg.depends_on(from_attr, to_attr)
+    #     return tuple(dg.resolve())
+    #
+    # def _resolutionOrder(self) -> Sequence[tuple[str, str]]:
+    #     if self._order is None:
+    #         self._order = self._computeResolutionOrder()
+    #     return self._order
+
+    def _setExpr(self, child: Graphic, anchor: Qt.AnchorPoint,
+                 value: str | config.PythonExpr) -> None:
+        name = child.objectName()
+        if not name:
+            raise ValueError(f"Child item {child} needs a name")
+        if isinstance(value, str):
+            value = config.PythonExpr(value)
+        if isinstance(value, (int, float)):
+            kns = self._knowns.setdefault(name, {})
+            kns[anchor] = value
+        elif isinstance(value, config.Expr):
+            self._exprs[name, anchor] = value
+            self._order = None
+
+    def resizeEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
+        super().resizeEvent(event)
+        self._updateContents()
+
+    @settable()
+    def setManualOrder(self, order: Sequence[Union[str, tuple[str, str]]]
+                       ) -> None:
+        self._manual_order = order
+
+    @settable("field:left", is_parent_method=True)
+    def setChildLeftExpr(self, child: Graphic, expr: FieldValue) -> None:
+        self._setExpr(child, Qt.AnchorLeft, expr)
+
+    @settable("field:top", is_parent_method=True)
+    def setChildTopExpr(self, child: Graphic, expr: FieldValue) -> None:
+        self._setExpr(child, Qt.AnchorTop, expr)
+
+    @settable("field:right", is_parent_method=True)
+    def setChildRightExpr(self, child: Graphic, expr: FieldValue) -> None:
+        self._setExpr(child, Qt.AnchorRight, expr)
+
+    @settable("field:bottom", is_parent_method=True)
+    def setChildBottomExpr(self, child: Graphic, expr: FieldValue) -> None:
+        self._setExpr(child, Qt.AnchorBottom, expr)
+
+    @settable("field:h_center", is_parent_method=True)
+    def setChildHCenterExpr(self, child: Graphic, expr: FieldValue) -> None:
+        self._setExpr(child, Qt.AnchorHorizontalCenter, expr)
+
+    @settable("field:v_center", is_parent_method=True)
+    def setChildVCenterExpr(self, child: Graphic, expr: FieldValue) -> None:
+        self._setExpr(child, Qt.AnchorVerticalCenter, expr)
+
+    def _updateContents(self) -> None:
+        rect = self.rect()
+        # print("parent_rect=", rect)
+        knowns = self._knowns
+        exprs = self._exprs
+        objs: dict[str, Graphic] = {
+            obj.objectName(): obj for obj in self.childGraphics()
+            if obj.objectName()
+        }
+        env: dict[str, FieldAdapter] = {
+            "parent": FieldAdapter.fromRect(rect)
+        }
+        for obj_name, obj in objs.items():
+            env[obj_name] = FieldAdapter(obj, resolved=knowns.get(obj_name))
+
+        if self._manual_order is not None or self._order is not None:
+            order = self._manual_order or self._order
+            for key in order:
+                obj_name, anchor = key
+                expr = exprs[key]
+                value = self._evaluateExpr(expr, extra_env=env)
+                env[obj_name].set(anchor, value)
+        else:
+            # We can't really use a straightforward dependency resolution
+            # algorithm to figure out the order in which to evaluate expressions
+            # because various attributes can be derived from others. So at least
+            # for now we just loop over ones we can't resolve until we can't
+            # loop anymore :(
+            # t = time.perf_counter()
+            order: list[tuple[str, Qt.AnchorPoint]] = []
+            to_do = list(exprs.items())
+            while to_do:
+                resolved_at_least_one = False
+                for i, (key, expr) in enumerate(to_do):
+                    obj_name, anchor = key
+                    try:
+                        value = self._evaluateExpr(expr, extra_env=env)
+                    except UnresolvedAnchor:
+                        continue
+                    else:
+                        to_do.pop(i)
+                        resolved_at_least_one = True
+                        env[obj_name].set(anchor, value)
+                        order.append((obj_name, anchor))
+                if not resolved_at_least_one:
+                    ues = [expr.source for _, expr in to_do]
+                    raise Exception(f"Undecidable expressions: {ues!r}")
+
+            # Remember this order for subsequent items
+            self._order = order
+            # print(f"Resolve order: {time.perf_counter() - t:0.04f}")
+
+        for obj_name, obj in objs.items():
+            adapter = env[obj_name]
+            rect = adapter.toRect()
+            obj.setGeometry(rect)
 
 
 @graphictype("anchors")
@@ -1660,35 +2052,3 @@ class AnchorsGraphic(RectangleGraphic):
     #     r = self.rect()
     #     painter.setPen(Qt.red)
     #     painter.drawRect(r)
-
-
-def graphicFromData(data: dict[str, Any], parent: Graphic = None,
-                    controller: config.DataController = None) -> Graphic:
-    # Make a copy of the data dict so we can pop keys off and not affect
-    # the caller
-    data = data.copy()
-    typename = data.pop("type", "text")
-    try:
-        graphic_class = graphic_class_registry[typename]
-    except KeyError:
-        raise Exception(f"Unknown tile type: {typename!r}")
-    if not issubclass(graphic_class, Graphic):
-        raise TypeError(f"Class {graphic_class} is not a subclass of Graphic")
-
-    graphic = graphic_class.fromData(data, parent=parent, controller=controller)
-
-    size = graphic.effectiveSizeHint(Qt.PreferredSize, QtCore.QSizeF(-1, -1))
-    if size.isValid():
-        graphic.resize(size)
-
-    return graphic
-
-
-def rootFromTemplate(data: dict[str, Any], controller: config.DataController
-                     ) -> Graphic:
-    if not controller:
-        raise Exception("No controller")
-    controller.clear()
-    graphic = graphicFromData(data, controller=controller)
-    controller.setRoot(graphic)
-    return graphic

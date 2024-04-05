@@ -16,7 +16,7 @@ from .. import (config, converters, formatting, glyphs, models, styling, themes,
 from ..config import settable
 from ..editors.syntax import syntaxHighlighterConverter
 from ..themes import ThemeColor
-from . import controls, containers, core, layouts, charts, views
+from . import controls, containers, core, layouts, charts, views, widgets
 from .core import (FONT_FAMILY, NUMBER_FAMILY, graphictype, path_element,
                    Graphic, DynamicColor)
 
@@ -241,7 +241,6 @@ class Tile(core.RectangleGraphic):
     property_aliases = {
         "label_color": "label.text_color",
         "label_align": "label.text_align",
-        "bg_visible": "bg.visible",
         "bg_color": "bg.fill_color",
         "fill_color": "bg.fill_color"
     }
@@ -550,6 +549,7 @@ class Tile(core.RectangleGraphic):
     def contentItem(self) -> Graphic:
         return self._content
 
+    @settable("content_item", value_object_type=Graphic)
     def setContentItem(self, item: Optional[Graphic]) -> None:
         if item:
             if not item.objectName():
@@ -578,6 +578,14 @@ class Tile(core.RectangleGraphic):
     @settable()
     def setTintAlpha(self, alpha: float):
         self._tint.setAlphaF(alpha)
+
+    def backgroundVisible(self) -> bool:
+        return self.background().isVisible()
+
+    @settable("bg_visible", argtype=bool)
+    def setBackgroundVisible(self, visible: bool) -> None:
+        self.background().setVisible(visible)
+        self._updateLabelBgVisibility()
 
     def labelBackgroundIsVisible(self) -> bool:
         return self.label().isBackgroundVisible()
@@ -859,6 +867,7 @@ class TextTile(Tile):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent=parent)
         self._text_selectable = True
+        self._links_clickable = True
         self._copy_button_enabled = True
         self._copy_button_alignment = Qt.AlignBottom | Qt.AlignRight
         self._valuemap: dict[str, str] = {}
@@ -881,6 +890,7 @@ class TextTile(Tile):
         content.setFont(self.contentFont(self._font_family))
         content.setTextColor(ThemeColor.value)
         content.setTextSelectable(self._text_selectable)
+        content.setLinksClickable(self._links_clickable)
         return content
 
     def formatter(self) -> Callable[[Any], str]:
@@ -976,13 +986,17 @@ class TextTile(Tile):
 
     @settable(argtype=bool)
     def setTextSelectable(self, selectable: bool) -> None:
+        self._text_selectable = selectable
         content = self.contentItem()
         if isinstance(content, controls.TextGraphic):
             content.setTextSelectable(selectable)
 
     @settable(argtype=bool)
     def setLinksClickable(self, clickable: bool) -> None:
-        self.contentItem().setLinksClickable(clickable)
+        self._links_clickable = clickable
+        content = self.contentItem()
+        if isinstance(content, controls.TextGraphic):
+            content.setLinksClickable(clickable)
 
     @settable()
     def setSyntaxColoring(self,
@@ -1068,14 +1082,6 @@ class NoticeTile(TextTile):
     @path_element(controls.StringGraphic, "icon")
     def iconItem(self) -> Optional[controls.StringGraphic]:
         return self._icon
-
-    @settable(argtype=bool)
-    def setTextSelectable(self, selectable: bool) -> None:
-        self.contentItem().setTextSelectable(selectable)
-
-    @settable(argtype=bool)
-    def setLinksClickable(self, clickable: bool) -> None:
-        self.contentItem().setLinksClickable(clickable)
 
     def setGlyph(self, glyph: glyphs.Glyph) -> None:
         self.prepareGeometryChange()
@@ -1788,6 +1794,8 @@ class ContainerTile(Tile):
 
 
 class LayoutTile(ContainerTile):
+    contentSizeChanged = QtCore.Signal()
+
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
         self._sizes_to_children = False
@@ -1808,13 +1816,13 @@ class LayoutTile(ContainerTile):
 
     def _onContentSizeChanged(self) -> None:
         self.prepareGeometryChange()
+        self.contentSizeChanged.emit()
         self.updateGeometry()
 
     def eventFilter(self, watched: QtWidgets.QGraphicsWidget,
                     event: QtCore.QEvent) -> bool:
         if watched == self._content and event.type() == event.LayoutRequest:
-            self.prepareGeometryChange()
-            self.updateGeometry()
+            self._onContentSizeChanged()
         return super().eventFilter(watched, event)
 
     def _contentSizeHint(self, which: Qt.SizeHint,
@@ -1946,6 +1954,10 @@ class LinearLayoutTile(LayoutTile):
     #     "align": "layout.align"
     # }
 
+    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
+        super().__init__(parent)
+        self._shrink_factors: dict[int, float] = {}
+
     def _makeArrangement(self) -> layouts.Arrangement:
         arr = layouts.LinearArrangement()
         arr.setMargins(0, 0, 0, 0)
@@ -1965,9 +1977,13 @@ class LinearLayoutTile(LayoutTile):
     #     self.contentLayout().setSpacing(spacing)
 
     @settable("line:stretch", is_parent_method=True)
-    def setChildStretch(self, tile: Tile, factor: int) -> None:
+    def setChildStretch(self, tile: Tile, factor: float) -> None:
         # self.contentLayout().setStretchFactor(tile, factor)
         self.contentArrangement().setStretchFactor(tile, factor)
+
+    @settable("line:shrink", is_parent_method=True)
+    def setChildShrink(self, child: Graphic, factor: float) -> None:
+        self._shrink_factors[id(child)] = factor
 
     # def paint(self, painter: QtGui.QPainter,
     #           option: QtWidgets.QStyleOptionGraphicsItem,
@@ -2322,6 +2338,12 @@ class ListTile(Tile):
     property_aliases = {
         "use_sections": "contents.use_sections",
         "section_key": "contents.section_key",
+        "measure_values": "contents.measure_values",
+        "dynamic_item_width": "contents.dynamic_item_width",
+        "prewarm": "contents.prewarm",
+        "h_space": "contents.h_space",
+        "v_space": "contents.v_space",
+        "spacing": "contents.spacing",
     }
 
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
@@ -2383,20 +2405,10 @@ class ListTile(Tile):
     # def setSectionKeyDataID(self, col_id: int|str) -> None:
     #     self._content.setSectionKeyDataID(col_id)
 
-    @settable("h_space")
-    def setHorizontalSpacing(self, hspace: float):
-        self._content.setHorizontalSpacing(hspace)
-        self.updateGeometry()
-
-    @settable("v_space")
-    def setVerticalSpacing(self, vspace: float):
-        self._content.setVerticalSpacing(vspace)
-        self.updateGeometry()
-
     @settable()
-    def setSpacing(self, space: float):
-        self._content.setSpacing(space)
-        self.updateGeometry()
+    def setValueFontMap(self, value_font_map: dict[str, QtGui.QFont]) -> None:
+        content: views.DataListGraphic = self.contentItem()
+        content.setValueFontMap(value_font_map)
 
     @settable()
     def setHideWhenEmpty(self, hide_when_empty: bool):
@@ -2424,7 +2436,7 @@ class EditorTile(Tile):
         self._saved = ""
 
         self._editor = QtWidgets.QPlainTextEdit()
-        self._editor.setVerticalScrollBar(controls.ScrollBar(Qt.Vertical))
+        self._editor.setVerticalScrollBar(widgets.ScrollBar(Qt.Vertical))
         self._editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._editor.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         # self._editor.setFrameStyle(self._editor.NoFrame)
@@ -2796,7 +2808,6 @@ class ExpandingTile(Tile):
 
         self._content.geometryChanged.connect(self.updateGeometry)
         self._content.installEventFilter(self)
-
         self._updateState()
 
     def eventFilter(self, watched: QtWidgets.QGraphicsWidget,
@@ -2810,6 +2821,10 @@ class ExpandingTile(Tile):
     def _makeExpandingItem(self) -> Graphic:
         raise NotImplementedError
 
+    def updateableChildren(self) -> Iterable[Graphic]:
+        if self._content:
+            yield self._content
+
     @settable(value_object_type=Graphic)
     def setContentItem(self, item: Graphic) -> None:
         self._content.setContentItem(item)
@@ -2817,6 +2832,7 @@ class ExpandingTile(Tile):
 
     def toggle(self, animated=False) -> None:
         self._content.toggle(animated=animated)
+        self.updateGeometry()
 
     def isOpen(self) -> bool:
         return self._content.isOpen()
@@ -3428,10 +3444,139 @@ class BlankTile(TextTile):
 
 
 @graphictype("surface")
-class Surface(LinearLayoutTile):
+class SurfaceTile(LinearLayoutTile):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
-        self.setContentsMargins(5.0, 10.0, 5.0, 10.0)
+        self._title_item: Optional[Graphic] = None
+        self._title_target_name: Optional[str] = None
+        self._title_target_item: Optional[Graphic] = None
+        self._title_min_y = 0.0
+        self._title_shown = False
+        self._footer_item: Optional[Graphic] = None
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._updateTitleAndFooterVisibility()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._updateTitleAndFooterVisibility()
+
+    def itemChange(self, change: QtWidgets.QGraphicsItem.GraphicsItemChange,
+                   value: Any) -> Any:
+        if change == self.ItemScenePositionHasChanged:
+            self._updateTitleAndFooterVisibility()
+        elif change == self.ItemSceneChange:
+            old = self.scene()
+            if old and isinstance(old, core.GraphicScene):
+                old.viewportChanged.disconnect(
+                    self._updateTitleAndFooterVisibility)
+            if isinstance(value, core.GraphicScene):
+                value.viewportChanged.connect(
+                    self._updateTitleAndFooterVisibility)
+        return super().itemChange(change, value)
+
+    def updateableChildren(self) -> Iterable[Graphic]:
+        yield from super().updateableChildren()
+        if self._title_item:
+            yield self._title_item
+        if self._footer_item:
+            yield self._footer_item
+
+    @settable("title_item", value_object_type=Graphic)
+    def setTitleItem(self, item: Graphic) -> None:
+        self._title_item = item
+        item.setParentItem(self)
+        item.setZValue(10)
+        self._updateTitleAndFooterVisibility(animated=False)
+
+    def titleTargetItem(self) -> Optional[QtWidgets.QGraphicsWidget]:
+        name = self._title_target_name
+        item = self._title_target_item
+        if name and not item:
+            item = self.findChildGraphic(name, recursive=True)
+            self._title_target_item = item
+        return item
+
+    @settable("title_target")
+    def setTitleTargetName(self, object_name: str) -> None:
+        self._title_target_name = object_name
+        self._updateTitleAndFooterVisibility(animated=False)
+
+    @settable("title_min_y")
+    def setTitleMinimumY(self, min_y: float) -> None:
+        self._title_min_y = min_y
+        self._updateTitleAndFooterVisibility(animated=False)
+
+    def viewportChanged(self) -> None:
+        self._updateTitleAndFooterVisibility()
+
+    def shouldShowTitle(self) -> bool:
+        title = self._title_item
+        scroll_y = self.scrollY()
+        if not title:
+            return False
+        if scroll_y < self._title_min_y:
+            return False
+        if target := self.titleTargetItem():
+            target_bottom = target.geometry().bottom() - scroll_y
+            header_bottom = scroll_y + title.size().height()
+            return target_bottom < header_bottom
+        return True
+
+    def footerItem(self) -> Optional[Graphic]:
+        return self._footer_item
+
+    @settable("footer_item", value_object_type=Graphic)
+    def setFooterItem(self, item: Graphic) -> None:
+        self._footer_item = item
+        item.setParentItem(self)
+        item.setZValue(9)
+        self._updateContents()
+
+    def shouldShowFooter(self) -> bool:
+        footer = self._footer_item
+        return bool(footer)
+
+    def viewportRect(self) -> QtCore.QRectF:
+        # This must return the visible rect in SCENE coordinates
+        vport = self.parentViewportRect()
+        if self.shouldShowTitle():
+            title = self._title_item
+            vport.setTop(vport.top() + title.size().height())
+        if self.shouldShowFooter():
+            footer = self._footer_item
+            vport.setBottom(vport.bottom() - footer.size().height())
+        return vport
+
+    def scrollY(self) -> float:
+        return self.parentViewportRect().y()
+
+    def _updateTitleAndFooterVisibility(self, animated=True):
+        animated = animated and not self.animationDisabled()
+        title = self._title_item
+        view_rect = self.parentViewportRect()
+        vw = view_rect.width()
+        constraint = QtCore.QSizeF(vw, -1)
+        if title:
+            # Keep track of _title_shown instead of just checking if the title
+            # is currently visible, because it could be visible but already
+            # fading out
+            show_title = self.shouldShowTitle()
+            tsize = title.effectiveSizeHint(Qt.PreferredSize, constraint)
+            title.setGeometry(QtCore.QRectF(view_rect.topLeft(), tsize))
+            if animated and show_title and not self._title_shown:
+                title.fadeIn()
+            elif animated and self._title_shown and not show_title:
+                title.fadeOut()
+            else:
+                title.setVisible(show_title)
+            self._title_shown = show_title
+        footer = self._footer_item
+        if footer:
+            fsize = footer.effectiveSizeHint(Qt.PreferredSize, constraint)
+            footer.setGeometry(QtCore.QRectF(view_rect.topLeft(), fsize))
+            footer.setVisible(self.shouldShowFooter())
 
     # def paint(self, painter: QtGui.QPainter,
     #           option: QtWidgets.QStyleOptionGraphicsItem,

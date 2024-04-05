@@ -1,14 +1,334 @@
 from __future__ import annotations
-import math
 from typing import cast, Iterable, Optional, Sequence, Union
 
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
 
 from ..config import settable
-from ..util import validSizeHint
-from . import core, effects, layouts
+from . import controls, core, effects, layouts
 from .core import graphictype, path_element, makeAnim, Graphic
+
+
+@graphictype("containers.scroll")
+class ScrollGraphic(core.RectangleGraphic):
+    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
+        super().__init__(parent)
+        self._last_content_size = QtCore.QSizeF(-1, -1)
+        self._updating_contents = False
+        self._content: Optional[Graphic] = None
+        self._scroll_pos = QtCore.QPointF(0, 0)
+        self._vsb_item = controls.ScrollBarItem(Qt.Vertical, self)
+        self._vsb_item.setZValue(20)
+        self._title_item: Optional[Graphic] = None
+        self._title_target_name: Optional[str] = None
+        self._title_target_item: Optional[Graphic] = None
+        self._title_min_y = 0.0
+        self._title_shown = False
+        self._footer_item: Optional[Graphic] = None
+
+        self._match_width = True
+        self.setClipping(True)
+
+        self.verticalScrollBar().valueChanged.connect(self._onVScroll)
+        self.verticalScrollBar().setSingleStep(16)
+
+        self._updateContents()
+
+    # def itemChange(self, change: QtWidgets.QGraphicsItem.GraphicsItemChange,
+    #                value: Any) -> Any:
+    #     if change == self.ItemSceneChange:
+    #         old_scene = self.scene()
+    #         if old_scene:
+    #             old_scene.sceneRectChanged.disconnect(self.updateGeometry)
+    #         new_scene = cast(QtWidgets.QGraphicsScene, value)
+    #         new_scene.sceneRectChanged.connect(self.updateGeometry)
+    #
+    #     return super().itemChange(change, value)
+
+    def setGeometry(self, rect: QtCore.QRectF) -> None:
+        super().setGeometry(rect)
+        self._updateContents()
+
+    def resizeEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
+        super().resizeEvent(event)
+        self._updateContents()
+
+    def addChild(self, item: QtWidgets.QGraphicsItem) -> None:
+        self.setContentItem(item)
+
+    @path_element(Graphic, "contents")
+    def contentsItem(self) -> Graphic:
+        return self._content
+
+    @settable("content_item", value_object_type=Graphic)
+    def setContentItem(self, item: Graphic) -> None:
+        if self._content:
+            # self._content.removeEventFilter(self)
+            self._content.geometryChanged.disconnect(self._onContentSizeChanged)
+
+        self._content = item
+        item.setParentItem(self)
+        item.setZValue(0)
+
+        self._content.geometryChanged.connect(self._onContentSizeChanged)
+        self._content.installEventFilter(self)
+        self._updateContents()
+
+    def _onContentSizeChanged(self) -> None:
+        content = self._content
+        if content:
+            size = content.size()
+            if size.isEmpty():
+                return
+            if size != self._last_content_size:
+                if self._updating_contents:
+                    # print("already", self.objectName(), size)
+                    pass
+                else:
+                    self.updateGeometry()
+                    self._updateContents()
+                    self._last_content_size = size
+
+    def contentsSizeHint(self, which: Qt.SizeHint,
+                        constraint: QtCore.QSizeF = None) -> QtCore.QSizeF:
+        constraint = constraint or QtCore.QSizeF(-1, -1)
+        return self.contentsItem().sizeHint(which, constraint)
+
+    def eventFilter(self, watched: QtWidgets.QGraphicsWidget,
+                    event: QtCore.QEvent) -> bool:
+        if watched == self._content and event.type() == event.LayoutRequest:
+            self.prepareGeometryChange()
+            self.updateGeometry()
+            self._updateContents()
+        return super().eventFilter(watched, event)
+
+    def titleItem(self) -> Optional[Graphic]:
+        return self._title_item
+
+    @settable("title_item", value_object_type=Graphic)
+    def setTitleItem(self, item: Graphic) -> None:
+        self._title_item = item
+        item.setParentItem(self)
+        item.setZValue(10)
+        self._updateTitleAndFooterVisibility(animated=False)
+
+    def titleTargetItem(self) -> Optional[QtWidgets.QGraphicsWidget]:
+        name = self._title_target_name
+        item = self._title_target_item
+        if name and not item:
+            item = self.findChildGraphic(name, recursive=True)
+            self._title_target_item = item
+        return item
+
+    @settable("title_target")
+    def setTitleTargetName(self, object_name: str) -> None:
+        self._title_target_name = object_name
+        self._updateTitleAndFooterVisibility(animated=False)
+
+    @settable("title_min_y")
+    def setTitleMinimumY(self, min_y: float) -> None:
+        self._title_min_y = min_y
+        self._updateTitleAndFooterVisibility(animated=False)
+
+    def footerItem(self) -> Optional[Graphic]:
+        return self._footer_item
+
+    @settable("footer_item", value_object_type=Graphic)
+    def setFooterItem(self, item: Graphic) -> None:
+        self._footer_item = item
+        item.setParentItem(self)
+        item.setZValue(9)
+        self._updateContents()
+
+    def dataProxy(self) -> Optional[Graphic]:
+        return self.contentsItem()
+
+    def localEnv(self) -> dict[str, Any]:
+        return self.contentsItem().localEnv()
+
+    @path_element(Graphic, "title")
+    def titleItem(self) -> Graphic:
+        return self._title_item
+
+    @path_element(Graphic, "footer")
+    def footerItem(self) -> Graphic:
+        return self._footer_item
+
+    def verticalScrollBar(self) -> QtWidgets.QScrollBar:
+        return self._vsb_item.widget()
+
+    @settable("scroll_y")
+    def setScrollY(self, y: int) -> None:
+        self.verticalScrollBar().setValue(y)
+
+    def scrollToTop(self) -> None:
+        self.setScrollY(0)
+
+    def scrollbarNeeded(self) -> bool:
+        if self._content:
+            return self._content.size().height() > self.size().height()
+        else:
+            return False
+
+    def viewportRect(self) -> QtCore.QRectF:
+        # This must return the visible rect in SCENE coordinates
+        scene_r = self.parentViewportRect()
+        safe_r = self.mapRectToScene(self.safeArea())
+        return scene_r.intersected(safe_r)
+
+    def safeArea(self) -> QtCore.QRectF:
+        rect = self.rect()
+        if self.scrollbarNeeded():
+            vsb = self.verticalScrollBar()
+            rect.setRight(rect.right() - vsb.width())
+        if self.shouldShowTitle():
+            title = self._title_item
+            rect.setTop(rect.top() + title.size().height())
+        if self.shouldShowFooter():
+            footer = self._footer_item
+            rect.setBottom(rect.bottom() - footer.size().height())
+        return rect
+
+    def sizeHint(self, which: Qt.SizeHint, constraint: QtCore.QSizeF = None
+                 ) -> QtCore.QSizeF:
+        constraint = constraint or QtCore.QSizeF(-1, -1)
+        contents = self.contentsItem()
+        if contents:
+            vsb_width = self.verticalScrollBar().width()
+            cw = constraint.width()
+            if cw >= 0:
+                constraint.setWidth(cw - vsb_width)
+            size = contents.sizeHint(which, constraint)
+            return size
+        return constraint
+
+    def _onVScroll(self) -> None:
+        v = self.verticalScrollBar().value()
+        self._scroll_pos.setY(max(0, v))
+        self._updateScrollPosition()
+        self._updateTitleAndFooterVisibility()
+        self._vsb_item.update()
+
+    def _updateScrollPosition(self) -> None:
+        contents = self.contentsItem()
+        if not contents:
+            return
+        contents.setPos(-self._scroll_pos)
+
+    def _updateContents(self) -> None:
+        if self._updating_contents:
+            raise Exception(f"Already updating {self.objectName()}")
+        rect = self.rect()
+        width = rect.width()
+        page_height = rect.height()
+        contents = self.contentsItem()
+        if not contents:
+            return
+        self._updating_contents = True
+
+        vsb = self.verticalScrollBar()
+        vsb_width = vsb.width()
+        vsb_x = rect.right() - vsb_width
+        vsb_rect = QtCore.QRectF(vsb_x, rect.y(), vsb_width, rect.height())
+        # if self.objectName() == "root":
+        #     print("rect=", rect, "x=", vsb_x, "vsb=", vsb_rect)
+        self._vsb_item.setGeometry(vsb_rect)
+        self._vsb_item.update()
+        vsb.setPageStep(int(page_height))
+
+        if self._match_width:
+            vp_width = width - vsb_width - 1
+            constraint = QtCore.QSizeF(vp_width, -1)
+            csize = contents.sizeHint(Qt.PreferredSize, constraint)
+            # if csize.height() <= page_height:
+            #     vp_width = width
+            csize.setWidth(vp_width)
+            crect = QtCore.QRectF(-self._scroll_pos, csize)
+            contents.setGeometry(crect)
+        else:
+            csize = contents.size()
+
+        can_scroll = rect.height() < csize.height()
+        self._vsb_item.setVisible(can_scroll)
+        if can_scroll:
+            vscroll_max = csize.height() - page_height
+            vsb.setRange(0, int(vscroll_max))
+        else:
+            vsb.setRange(0, 0)
+        self._updateScrollPosition()
+        self._vsb_item.update()
+
+        constraint = QtCore.QSizeF(csize.width(), -1)
+        title = self._title_item
+        if title:
+            hsize = title.effectiveSizeHint(Qt.PreferredSize, constraint)
+            title.setGeometry(0, 0, csize.width(), hsize.height())
+        footer = self._footer_item
+        if footer:
+            fsize = footer.effectiveSizeHint(Qt.PreferredSize, constraint)
+            footer.setGeometry(0, rect.bottom() - fsize.height(),
+                               csize.width(), fsize.height())
+
+        self._updateTitleAndFooterVisibility()
+        self._updating_contents = False
+
+    # def update(self, *args, **kwargs):
+    #     self._updateContents()
+    #     super().update(*args, **kwargs)
+
+    def shouldShowTitle(self) -> bool:
+        header = self._title_item
+        if not header:
+            return False
+        if self._scroll_pos.y() < self._title_min_y:
+            return False
+        if target := self.titleTargetItem():
+            scroll_y = self._scroll_pos.y()
+            target_bottom = target.geometry().bottom() - scroll_y
+            header_bottom = header.geometry().bottom()
+            return target_bottom < header_bottom
+        return True
+
+    def shouldShowFooter(self) -> bool:
+        footer = self._footer_item
+        return bool(footer)
+
+    def _updateTitleAndFooterVisibility(self, animated=True):
+        animated = animated and not self.animationDisabled()
+        title = self._title_item
+        if title:
+            # Keep track of _title_shown instead of just checking if the title
+            # is currently visible, because it could be visible but already
+            # fading out
+            show_title = self.shouldShowTitle()
+            if animated and show_title and not self._title_shown:
+                title.fadeIn()
+            elif animated and self._title_shown and not show_title:
+                title.fadeOut()
+            else:
+                title.setVisible(show_title)
+            self._title_shown = show_title
+        footer = self._footer_item
+        if footer:
+            footer.setVisible(self.shouldShowFooter())
+
+    def wheelEvent(self, event: QtWidgets.QGraphicsSceneWheelEvent) -> None:
+        if self.scrollbarNeeded():
+            self.scene().sendEvent(self._vsb_item, event)
+            event.accept()
+        else:
+            parent = self.parentItem()
+            if parent:
+                parent.wheelEvent(event)
+
+    # def paint(self, painter: QtGui.QPainter,
+    #           option: QtWidgets.QStyleOptionGraphicsItem,
+    #           widget: Optional[QtWidgets.QWidget] = None) -> None:
+    #     r = self.rect()
+    #     painter.setPen(Qt.red)
+    #     painter.drawRect(r)
+    #     painter.setPen(Qt.green)
+    #     painter.drawRect(self.mapRectFromScene(self.viewportRect()))
 
 
 class ContainerGraphic(core.AreaGraphic):
@@ -47,7 +367,6 @@ class ContainerGraphic(core.AreaGraphic):
     def _reset(self) -> None:
         # self._anim_group.stop()
         self._repositionContents()
-
 
 
 class SwitchingContainerGraphic(ContainerGraphic):

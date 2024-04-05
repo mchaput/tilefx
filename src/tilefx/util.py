@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import Any, Optional, Sequence
+from collections import defaultdict
+from typing import Any, Generic, Optional, Iterable, Hashable, Sequence
 
 import math
 from typing import TypeVar
@@ -9,6 +10,7 @@ from PySide2.QtCore import Qt
 
 
 # Type aliases
+H = TypeVar("H", bound=Hashable)
 K = TypeVar("K")
 V = TypeVar("V")
 
@@ -159,3 +161,47 @@ def alignedRectF(direction: Qt.LayoutDirection, alignment: Qt.Alignment,
         x = rectangle.center().x() - w / 2.0
 
     return QtCore.QRectF(x, y, w, h)
+
+
+class CircularDependencyError(Exception):
+    pass
+
+
+class DependencyGraph(Generic[H]):
+    def __init__(self, values: Iterable[H] = None):
+        self._values = list(values) if values else []
+        self._value_set: set[H] = set(self._values)
+        self._prereqs: defaultdict[H, set[H]] = defaultdict(set)
+        self._resolved: set[H] = set()
+        self._unresolved: set[H] = set()
+
+    def add(self, value: H) -> None:
+        if value not in self._value_set:
+            self._value_set.add(value)
+            self._values.append(value)
+
+    def depends_on(self, value: H, prereq: H) -> None:
+        if value not in self._value_set:
+            self.add(value)
+        if prereq not in self._value_set:
+            self.add(prereq)
+        self._prereqs[value].add(prereq)
+
+    def resolve(self, values: Sequence[H] = None) -> Iterable[H]:
+        values = values or self._values
+        for v in values:
+            if v in self._resolved:
+                continue
+            if v in self._unresolved:
+                raise CircularDependencyError(v)
+
+            self._unresolved.add(v)
+            if v in self._prereqs:
+                prevs = list(self._prereqs[v])
+                prevs.sort(key=lambda x: self._values.index(x))
+                for prev in self.resolve(prevs):
+                    yield prev
+
+            self._unresolved.remove(v)
+            self._resolved.add(v)
+            yield v

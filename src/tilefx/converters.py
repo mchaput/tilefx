@@ -530,6 +530,32 @@ def fontWeightConverter(weight: Union[str, int, QtGui.QFont.Weight]
     return QtGui.QFont.Normal
 
 
+@converter(QtGui.QFont)
+def fontConverter(data: dict[str, Any] | QtGui.QFont,
+                  base_font: QtGui.QFont = None) -> QtGui.QFont:
+    if isinstance(data, QtGui.QFont):
+        return data
+    if not isinstance(data, dict):
+        raise TypeError(f"Can't convert {data!r} to font")
+    font = QtGui.QFont(base_font) if base_font else QtGui.QFont()
+    family = data.get("family")
+    if family is not None:
+        font.setFamily(family)
+    size = data.get("size")
+    if size is not None:
+        font.setPixelSize(textSizeConverter(size))
+    bold = data.get("bold")
+    if bold is not None:
+        font.setBold(bool(bold))
+    italic = data.get("italic")
+    if italic is not None:
+        font.setItalic(bool(italic))
+    weight = data.get("weight")
+    if weight:
+        font.setWeight(fontWeightConverter(weight))
+    return font
+
+
 @converter(QtWidgets.QGraphicsLayout)
 def graphicsLayoutConverter(layout: Union[str, dict, QtWidgets.QGraphicsLayout]
                             ) -> QtWidgets.QGraphicsLayout:

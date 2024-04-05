@@ -94,10 +94,10 @@ def settable(name: str = None, *, argtype: type = None,
                 f"Parent setter method {method_name} name must start "
                 "with 'setChild'"
             )
-        elif not method_name.startswith("set"):
-            raise NameError(
-                f"Setter method {method_name} name must start with 'set'"
-            )
+        # elif not method_name.startswith("set"):
+        #     raise NameError(
+        #         f"Setter method {method_name} name must start with 'set'"
+        #     )
 
         key = name or camelToSnake(method_name, drop_set=True)
         settables_lookup[id(m)] = SetterInfo(
@@ -245,7 +245,10 @@ def setSettable(obj: QtCore.QObject, key: str, value: Any) -> None:
         known = settableNames(obj)
         raise KeyError(f"Property {key!r} not found on {obj!r} ({orig_key}): "
                        f"{known}")
-    set_method(obj, value)
+    try:
+        set_method(obj, value)
+    except TypeError as e:
+        raise TypeError(f"Error setting {key} to {value} on {obj}: {e}")
 
 
 # Controller
@@ -398,8 +401,13 @@ class PythonExpr(Expr):
         super().__init__(**kwargs)
         self.source = ""
         if isinstance(expression, str):
+            if not expression:
+                raise SyntaxError("Expression cannot be an empty string")
             self.source = expression
-            tree = ast.parse(expression, mode="eval")
+            try:
+                tree = ast.parse(expression, mode="eval")
+            except SyntaxError as e:
+                raise SyntaxError(f"{expression!r}: {e}")
             for n in ast.walk(tree):
                 if isinstance(n, ast.Name) and n.id == "__import__" or \
                         isinstance(n, (ast.Import, ast.ImportFrom)):
@@ -679,6 +687,9 @@ class AbstractController(QtCore.QObject):
     def clear(self) -> None:
         pass
 
+    def clearEnv(self) -> None:
+        self._global_env.clear()
+
     def prepObject(self, obj: QtCore.QObject, data: dict[str, Any]) -> None:
         raise NotImplementedError
 
@@ -686,7 +697,7 @@ class AbstractController(QtCore.QObject):
         return self._global_env.copy()
 
     def setGlobalEnv(self, env: dict[str, Any]) -> None:
-        self._global_env = env
+        self._global_env = env.copy()
 
     def updateGlobalEnv(self, env: dict[str, Any]) -> None:
         self._global_env.update(env)
@@ -711,6 +722,7 @@ class DataController(AbstractController):
         return env
 
     def clear(self) -> None:
+        super().clear()
         self._updaters.clear()
         self._template_updaters.clear()
         self.models.clear()
@@ -830,8 +842,10 @@ class DataController(AbstractController):
             raise Exception("No root item set")
         self.updateObjectDependencies(root, data, env, name)
 
-    def updateObjectDependencies(self, obj: QtCore.QObject, data: dict[str, Any],
-                                 env: dict[str, JsonValue], name: str) -> None:
+    def updateObjectDependencies(self, obj: QtCore.QObject,
+                                 data: Optional[dict[str, Any]],
+                                 env: Optional[dict[str, JsonValue]],
+                                 name: str) -> None:
         from .graphics import core, views
 
         env = env if env is not None else self.globalEnv()
@@ -951,13 +965,16 @@ class DataController(AbstractController):
 
     def updateItemFromModel(self, model: QtCore.QAbstractItemModel, row: int,
                             obj: QtCore.QObject, item: QtCore.QObject,
-                            key="item_template") -> None:
+                            key="item_template",
+                            extra_env: dict[str, Any] = None) -> None:
         from .models import ModelRowAdapter
         env = {
             "model": model,
             "row_num": row,
             "item":  ModelRowAdapter(model, row)
         }
+        if extra_env:
+            env.update(extra_env)
         self.updateTemplateItemFromEnv(obj, key, item, env)
 
 

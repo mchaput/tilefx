@@ -1,11 +1,12 @@
 from __future__ import annotations
 import pathlib
+import time
 from typing import Any, Optional, Union
 
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
 
-from .. import config
+from .. import config, themes
 from . import core
 
 
@@ -28,7 +29,10 @@ class ZoomingView(QtWidgets.QGraphicsView):
         self.addAction(self.zoomOutAction)
 
         self.zoomInAction = QtWidgets.QAction("Zoom In", self)
-        self.zoomInAction.setShortcut(QtGui.QKeySequence("Ctrl+="))
+        self.zoomInAction.setShortcuts([
+            QtGui.QKeySequence("Ctrl+="),
+            QtGui.QKeySequence("Ctrl++")
+        ])
         self.zoomInAction.triggered.connect(self.zoomIn)
         self.addAction(self.zoomInAction)
 
@@ -36,6 +40,16 @@ class ZoomingView(QtWidgets.QGraphicsView):
         self.unzoomAction.setShortcut(QtGui.QKeySequence("Ctrl+0"))
         self.unzoomAction.triggered.connect(self.unzoom)
         self.addAction(self.unzoomAction)
+
+        self.toggleAnimationAction = QtWidgets.QAction("Reduce Motion", self)
+        self.toggleAnimationAction.setCheckable(True)
+        self.toggleAnimationAction.setChecked(False)
+        self.toggleAnimationAction.toggled.connect(self.setAnimationDisabled)
+
+    def setAnimationDisabled(self, disabled: bool) -> None:
+        scene = self.scene()
+        if isinstance(scene, core.GraphicScene):
+            scene.setAnimationDisabled(disabled)
 
     def globalScale(self) -> float:
         return self._global_scale
@@ -86,27 +100,48 @@ class ZoomingView(QtWidgets.QGraphicsView):
 
 
 class GraphicView(ZoomingView):
+    SizeSceneRectToContent = 0
+    SizeSceneRectToView = 1
+
+    viewportChanged = QtCore.Signal()
+    contentSizeChanged = QtCore.Signal()
+
     def __init__(self, parent: QtWidgets.QWidget = None):
         super().__init__(parent)
+        self._use_own_vsb = True
         self._template_path: Optional[pathlib.Path] = None
+        self._scene_rect_mode = self.SizeSceneRectToContent
 
         self.setBackgroundRole(QtGui.QPalette.Window)
         self.setContentsMargins(0, 0, 0, 0)
         # self.setDragMode(self.ScrollHandDrag)
         self.setInteractive(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.setRenderHint(QtGui.QPainter.Antialiasing, True)
         self.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
-        self.setAlignment(Qt.AlignCenter)
+
+        vsb = ScrollBar(Qt.Vertical)
+        vsb.setAutoFillBackground(False)
+        self.setVerticalScrollBar(vsb)
+        vsb.valueChanged.connect(self.notifyViewportChanged)
 
     def setScene(self, scene: core.GraphicScene) -> None:
         old_scene = self.scene()
-        if old_scene and isinstance(old_scene, core.GraphicScene):
+        if isinstance(old_scene, core.GraphicScene):
             old_scene.rootChanged.disconnect(self.fitToContents)
+            old_scene.rootGeometryChanged.disconnect(self._onContentSizeChanged)
         super().setScene(scene)
-        if scene and isinstance(scene, core.GraphicScene):
+        if isinstance(scene, core.GraphicScene):
             scene.rootChanged.connect(self.fitToContents)
+            scene.contentSizeChanged.connect(self._onContentSizeChanged)
+            palette = scene.themePalette().qtPalette()
+            self.setPalette(palette)
+            self.verticalScrollBar().setPalette(palette)
+
+    def _onContentSizeChanged(self) -> None:
+        self.fitToContents()
+        self.contentSizeChanged.emit()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -116,51 +151,89 @@ class GraphicView(ZoomingView):
         super().showEvent(event)
         self.fitToContents()
 
+    def sceneRectMode(self) -> int:
+        return self._scene_rect_mode
+
+    def setSceneRectMode(self, mode: int) -> None:
+        self._scene_rect_mode = mode
+
+    def setUseOwnVerticalScrollBar(self, use_own_vsb: bool) -> None:
+        self._use_own_vsb = use_own_vsb
+        policy = Qt.ScrollBarAlwaysOn if use_own_vsb else Qt.ScrollBarAlwaysOff
+        self.setVerticalScrollBarPolicy(policy)
+        self.fitToContents()
+
     def viewRect(self) -> QtCore.QRectF:
-        rect = QtCore.QRectF(self.rect())
+        rect = self.rect()
+        vsb = self.verticalScrollBar()
+        if vsb.isVisible():
+            rect.setWidth(rect.width() - vsb.width())
+
+        rect = QtCore.QRectF(rect)
         factor = self._zoom_scale * self._global_scale
         vw = rect.width() / factor
         vh = rect.height() / factor
         rect.setSize(QtCore.QSizeF(vw, vh))
         return rect
 
-    def fitToContents(self):
-        scene = self.scene()
-        if not scene:
-            return
+    def scrollY(self) -> float:
+        y = self.verticalScrollBar().value()
+        factor = self._zoom_scale * self._global_scale
+        return y / factor
 
+    def viewportRect(self) -> QtCore.QRectF:
         view_rect = self.viewRect()
-        if isinstance(scene, core.GraphicScene):
-            root = scene.rootGraphic()
-            if root and root.isVisible():
-                # constraint = QtCore.QSizeF(vw, -1)
-                # size = root.effectiveSizeHint(Qt.PreferredSize, constraint)
-                root.setGeometry(view_rect)
+        view_rect.moveTop(self.scrollY())
+        return view_rect
 
-        self.scene().setSceneRect(view_rect)
+    def fitToContents(self):
+        root = self.rootGraphic()
+        view_rect = self.viewRect()
+        scene_rect = view_rect
+        if root:
+            if self.sceneRectMode() == self.SizeSceneRectToContent:
+                constraint = QtCore.QSizeF(view_rect.width(), -1)
+                csize = root.effectiveSizeHint(Qt.PreferredSize, constraint)
+                scene_rect = QtCore.QRectF(QtCore.QPointF(), csize)
+            if scene_rect != root.geometry():
+                # t = time.perf_counter()
+                root.setGeometry(scene_rect)
+                # print("  ", time.perf_counter() - t)
+        self.setSceneRect(scene_rect)
+        self.notifyViewportChanged()
+
+    def notifyViewportChanged(self) -> None:
+        from .core import GraphicScene
+        self.viewportChanged.emit()
+        scene = self.scene()
+        if isinstance(scene, GraphicScene):
+            scene.notifyViewportChanged()
 
     def scrollToTop(self) -> None:
-        from .views import ScrollGraphic
+        self.verticalScrollBar().setValue(0)
+
+        from .containers import ScrollGraphic
         root = self.rootGraphic()
         if isinstance(root, ScrollGraphic):
             root.scrollToTop()
 
-    def contentHeightForWidth(self, width: float) -> float:
-        from .views import ScrollGraphic
+    def widgetHeightHint(self) -> float:
+        from .containers import ScrollGraphic
         scene = self.scene()
         if not scene:
             return 0.0
         if not isinstance(scene, core.GraphicScene):
-            return scene.sceneRect().height()
+            return self.sceneRect().height()
 
         root = scene.rootGraphic()
-        constraint = QtCore.QSizeF(width, -1)
+        view_rect = self.viewRect()
+        constraint = QtCore.QSizeF(view_rect.width(), -1)
         if isinstance(root, ScrollGraphic):
             size = root.contentsSizeHint(Qt.PreferredSize, constraint)
         else:
-            size = root.sizeHint(Qt.PreferredSize, constraint)
+            size = root.effectiveSizeHint(Qt.PreferredSize, constraint)
 
-        # Compensate for the scaling factor
+        # Decompensate for the scaling factor
         factor = self._zoom_scale * self._global_scale
         return size.height() * factor
 
@@ -192,3 +265,78 @@ class GraphicView(ZoomingView):
         scene = self.scene()
         if isinstance(scene, core.GraphicScene):
             scene.setTemplate(template_data)
+
+    def setColorTheme(self, theme: themes.ColorTheme) -> None:
+        scene = self.scene()
+        if isinstance(scene, core.GraphicScene):
+            scene.setColorTheme(theme)
+            self.setPalette(scene.themePalette().qtPalette())
+
+    def setThemeColor(self, color: QtGui.QColor) -> None:
+        scene = self.scene()
+        if isinstance(scene, core.GraphicScene):
+            scene.setThemeColor(color)
+            self.setPalette(scene.themePalette().qtPalette())
+
+
+class ScrollBar(QtWidgets.QScrollBar):
+    def __init__(self, orientation: Qt.Orientation,
+                 parent: QtWidgets.QWidget = None):
+        super().__init__(orientation, parent)
+        self._track_width = 4.0
+        self._style = QtWidgets.QCommonStyle()
+
+    def trackAndHandleRects(self, track_width: float
+                            ) -> tuple[QtCore.QRectF, QtCore.QRectF]:
+        option = QtWidgets.QStyleOptionSlider()
+        option.initFrom(self)
+        option.minimum = self.minimum()
+        option.maximum = self.maximum()
+        option.orientation = self.orientation()
+        option.singleStep = self.singleStep()
+        option.pageStep = self.pageStep()
+        option.sliderPosition = self.sliderPosition()
+        option.sliderValue = self.sliderPosition()
+        option.upsideDown = self.invertedAppearance()
+
+        style = self._style
+        track_rect = QtCore.QRectF(style.subControlRect(
+            style.CC_ScrollBar, option, style.SC_ScrollBarGroove, self
+        ).normalized())
+        handle_rect = QtCore.QRectF(style.subControlRect(
+            style.CC_ScrollBar, option, style.SC_ScrollBarSlider, self
+        ).normalized())
+
+        hw = track_width / 2.0
+        ctr = track_rect.center()
+        if option.orientation == Qt.Vertical:
+            cx = ctr.x() - hw
+            tr = QtCore.QRectF(cx, track_rect.y(),
+                               track_width, track_rect.height())
+            hr = QtCore.QRectF(cx, handle_rect.y(),
+                               track_width, handle_rect.height())
+        else:
+            cy = ctr.y() - hw
+            tr = QtCore.QRectF(track_rect.x(), cy,
+                               track_rect.width(), track_width)
+            hr = QtCore.QRectF(handle_rect.x(), cy,
+                               handle_rect.width(), track_width)
+
+        return tr, hr
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        painter = QtGui.QPainter(self)
+        palette = self.palette()
+
+        painter.fillRect(self.rect(), palette.window())
+
+        track_rect, handle_rect = self.trackAndHandleRects(self._track_width)
+        half_width = self._track_width / 2.0
+        handle_color = palette.button().color()
+        track_color = QtGui.QColor(handle_color)
+        track_color.setAlphaF(0.5)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(track_color)
+        painter.drawRoundedRect(track_rect, half_width, half_width)
+        painter.setBrush(handle_color)
+        painter.drawRoundedRect(handle_rect, half_width, half_width)

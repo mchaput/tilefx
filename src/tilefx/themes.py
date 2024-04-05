@@ -87,7 +87,7 @@ def error_brush(color1=QtGui.QColor(255, 84, 84),
     return QtGui.QBrush(grad)
 
 
-def _hct(c: QtGui.QColor) -> Color:
+def qcolor_to_hct(c: QtGui.QColor) -> Color:
     rgb = Color("srgb", [c.redF(), c.greenF(), c.blueF()])
     return rgb.convert("hct")
 
@@ -198,9 +198,9 @@ class ColorTheme:
                   secondary_chroma=16, highlight_hue_rotation=-60.0,
                   highlight_min_chroma=32.0,
                   is_dark: bool = None) -> ColorTheme:
-        theme_hct = _hct(theme_color)
-        secondary_hct = _hct(secondary) if secondary else None
-        highlight_hct = _hct(highlight) if highlight else None
+        theme_hct = qcolor_to_hct(theme_color)
+        secondary_hct = qcolor_to_hct(secondary) if secondary else None
+        highlight_hct = qcolor_to_hct(highlight) if highlight else None
         return cls.fromHct(
             theme_hct,
             secondary_hct=secondary_hct,
@@ -355,7 +355,7 @@ class ColorTheme:
             ThemeColor.secondary_surface: self.secondary.tone(30),
             ThemeColor.secondary_surface_fg: self.secondary_fg.tone(90),
 
-            ThemeColor.highlight: self.highlight.tone(60),
+            ThemeColor.highlight: self.highlight.tone(90),
             ThemeColor.highlight_fg: self.highlight_fg.tone(20),
             ThemeColor.highlight_surface: self.highlight.tone(30),
             ThemeColor.highlight_surface_fg: self.highlight_fg.tone(90),
