@@ -20,7 +20,6 @@ WidgetType = Union[QtWidgets.QWidget, QtWidgets.QGraphicsWidget]
 
 
 converter_registry: dict[type, Callable] = {}
-takes_styled_object: set[Callable] = set()
 
 
 SMALL_LABEL_SIZE = 10
@@ -119,11 +118,9 @@ def marginsArgs(left: Union[QtCore.QMarginsF, float], top=0.0,
     return ms
 
 
-def converter(to_type: type, pass_styled=False):
+def converter(to_type: type):
     def wrapper(f: Callable):
         converter_registry[to_type] = f
-        if pass_styled:
-            takes_styled_object.add(f)
         return f
     return wrapper
 
@@ -251,7 +248,7 @@ def vectorConverter(vec: Union[str, Iterable]) -> Sequence[float]:
 
 def textSizeConverter(size: Union[int, str]) -> int:
     if isinstance(size, str):
-        size = size.lower().replace("-", "")
+        size = size.lower().replace("-", "").replace("_", "")
         if size in text_sizes:
             size = text_sizes[size]
         else:

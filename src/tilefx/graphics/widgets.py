@@ -121,7 +121,7 @@ class GraphicView(ZoomingView):
         self.setRenderHint(QtGui.QPainter.Antialiasing, True)
         self.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
 
-        vsb = ScrollBar(Qt.Vertical)
+        vsb = ScrollBar(Qt.Vertical, self)
         vsb.setAutoFillBackground(False)
         self.setVerticalScrollBar(vsb)
         vsb.valueChanged.connect(self.notifyViewportChanged)
@@ -231,7 +231,12 @@ class GraphicView(ZoomingView):
         if isinstance(root, ScrollGraphic):
             size = root.contentsSizeHint(Qt.PreferredSize, constraint)
         else:
-            size = root.effectiveSizeHint(Qt.PreferredSize, constraint)
+            root.updateGeometry()
+            # I don't know why, but calling this twice in a row gives two
+            # different results, and the second one is more correct. Until I
+            # figure out why, I have to leave this here like this :(
+            size = root.sizeHint(Qt.PreferredSize, constraint)
+            size = root.sizeHint(Qt.PreferredSize, constraint)
 
         # Decompensate for the scaling factor
         factor = self._zoom_scale * self._global_scale
@@ -327,14 +332,21 @@ class ScrollBar(QtWidgets.QScrollBar):
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         painter = QtGui.QPainter(self)
         palette = self.palette()
+        color = palette.window().color()
+        painter.fillRect(self.rect(), color)
 
-        painter.fillRect(self.rect(), palette.window())
+        # This widget doesn't seem to get the right palette from the parent
+        # view when in a Python pnael, so we can't reply on the correct colors.
+        # Just base the track and handle colors off the background color.
+        if color.lightnessF() < 0.6:
+            handle_color = color.lighter(200)
+        else:
+            handle_color = color.darker(200)
+        track_color = QtGui.QColor(handle_color)
+        track_color.setAlphaF(0.5)
 
         track_rect, handle_rect = self.trackAndHandleRects(self._track_width)
         half_width = self._track_width / 2.0
-        handle_color = palette.button().color()
-        track_color = QtGui.QColor(handle_color)
-        track_color.setAlphaF(0.5)
         painter.setPen(Qt.NoPen)
         painter.setBrush(track_color)
         painter.drawRoundedRect(track_rect, half_width, half_width)

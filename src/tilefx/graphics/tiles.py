@@ -2,6 +2,7 @@ from __future__ import annotations
 import enum
 import os.path
 import pathlib
+import weakref
 from datetime import datetime
 from typing import (TYPE_CHECKING, cast, Any, Callable, Collection, Iterable,
                     NamedTuple, Optional, Sequence, TypeVar, Union)
@@ -52,15 +53,15 @@ class NoticeLook(NamedTuple):
     surface_fg_color: themes.ThemeColor
 
 
-ERROR_LOOK = NoticeLook(glyphs.MaterialIcons.report,
+ERROR_LOOK = NoticeLook(glyphs.IconFX.error,
                         themes.ThemeColor.error,
                         themes.ThemeColor.error_surface,
                         themes.ThemeColor.error_surface_fg)
-WARNING_LOOK = NoticeLook(glyphs.MaterialIcons.priority_high,
+WARNING_LOOK = NoticeLook(glyphs.IconFX.warning,
                           themes.ThemeColor.warning,
                           themes.ThemeColor.warning_surface,
                           themes.ThemeColor.warning_surface_fg)
-MESSAGE_LOOK = NoticeLook(glyphs.MaterialIcons.info,
+MESSAGE_LOOK = NoticeLook(glyphs.IconFX.info,
                           themes.ThemeColor.success,
                           themes.ThemeColor.success_surface,
                           themes.ThemeColor.success_surface_fg)
@@ -156,16 +157,7 @@ def loadImage(path: pathlib.Path, size: QtCore.QSize) -> QtGui.QPixmap:
     return pixmap
 
 
-class TileBackground(core.RectangleGraphic):
-    def __init__(self, parent: QtWidgets.QGraphicsItem,
-                 parent_tile: Tile = None) -> None:
-        super().__init__(parent)
-        self._parent_tile = parent_tile or parent
-
-        self.setFlag(self.ItemClipsChildrenToShape, True)
-        self.setFlag(self.ItemStacksBehindParent, True)
-
-
+@graphictype("_tile_label")
 class TileLabel(controls.StringGraphic):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
@@ -203,7 +195,7 @@ class TileLabel(controls.StringGraphic):
     #         return super().sizeHint(which, constraint)
     #     return constraint
 
-    @settable(value_object_type=Graphic)
+    @settable(argtype=Graphic)
     def setLabelButton(self, button: controls.Graphic, at_start=False
                        ) -> None:
         self._button = button
@@ -224,7 +216,7 @@ class TileLabel(controls.StringGraphic):
             bsize = button.size()
             bw = bsize.width()
             bh = bsize.height()
-            by = rect.center().y() - bh/ 2
+            by = rect.center().y() - bh / 2
             if self._button_at_start:
                 bx = rect.x()
                 inset_start = bw + self._button_gap
@@ -241,8 +233,9 @@ class Tile(core.RectangleGraphic):
     property_aliases = {
         "label_color": "label.text_color",
         "label_align": "label.text_align",
-        "bg_color": "bg.fill_color",
-        "fill_color": "bg.fill_color"
+        "bg_color": "background.fill_color",
+        "fill_color": "background.fill_color",
+        "label_line_width": "label.line_width"
     }
 
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
@@ -250,24 +243,32 @@ class Tile(core.RectangleGraphic):
         # Call setObjectName on the superclass so we don't trigger logic for
         # renaming sub-items based on the tile name
         super().setObjectName(f"tile_{id(self):x}")
-        self._styles: dict[str, dict[str, Any]] = {}
         self._vars: dict[str, Any] = {}
         self._tiles: list[Tile] = []
         # If the tile background is turned off, we also turn off the label bg,
         # but we want to remember the desired visibility separate from the
         # actual visibility, so turning the tile bg back on will also turn on
         # the label bg again in that case
+        self._label_visible = True
         self._label_bg_visible = True
+        self._label_bg_free = False
         self._label_overlayed = False
         self._label_sticky = False
         self._sticky_offset = 10.0
         self._sticky_fade = 0.2
 
+        self._inside = False
+        self._copy_button: Optional[controls.ToolButtonGraphic] = None
+        self._copyable = True
+        self._copy_button_alignment = Qt.AlignBottom | Qt.AlignRight
+
         self.setBrush(Qt.NoBrush)
         self.setPen(Qt.NoPen)
         self.setCornerRadius(DEFAULT_TILE_CORNER_RADIUS)
 
-        self._bg = TileBackground(self)
+        self._bg = core.RectangleGraphic(self)
+        self._bg.setFlag(self.ItemClipsChildrenToShape, True)
+        self._bg.setFlag(self.ItemStacksBehindParent, True)
         self._bg.setFillColor(ThemeColor.surface)
         self._bg.setClipsToParentShape(True)
 
@@ -279,9 +280,6 @@ class Tile(core.RectangleGraphic):
         self._label.setTextColor(ThemeColor.fg)
         self._label.setFont(self.contentFont(size=converters.LABEL_SIZE))
         self._label.setMargins(QtCore.QMarginsF(8.0, 5.0, 8.0, 5.0))
-
-        self._line_color: Optional[QtGui.QColor] = None
-        self._line_width = 0.0
 
         # shadow = QtWidgets.QGraphicsDropShadowEffect(self)
         # shadow.setColor(QtGui.QColor.fromRgbF(0, 0, 0, 0.33))
@@ -307,10 +305,9 @@ class Tile(core.RectangleGraphic):
         self.setFont(self.contentFont())
 
         self.setHasWidthForHeight(True)
+        # self.setSelectable(True)
 
         self._bg.visibleChanged.connect(self._updateLabelBgVisibility)
-
-    _line_color = DynamicColor()
 
     def __del__(self):
         try:
@@ -330,12 +327,106 @@ class Tile(core.RectangleGraphic):
                    value: Any) -> Any:
         if change == self.ItemVisibleHasChanged and value:
             self.updateGeometry()
-        elif change == self.ItemScenePositionHasChanged and self.labelIsSticky():
+        elif change == self.ItemScenePositionHasChanged and self._label_sticky:
             self._updateTile()
+        elif change == self.ItemSelectedHasChanged:
+            self._updateCopyButtonVisibility()
+        elif change == self.ItemSceneChange:
+            self.sceneChanged(self.scene(), value)
         return super().itemChange(change, value)
+
+    def sceneChanged(self, old_scene: QtWidgets.QGraphicsScene,
+                     new_scene: QtWidgets.QGraphicsScene) -> None:
+        if old_scene and isinstance(old_scene, core.GraphicScene):
+            old_scene.viewportChanged.disconnect(self.viewportChanged)
+        if isinstance(new_scene, core.GraphicScene):
+            new_scene.viewportChanged.connect(self.viewportChanged)
 
     def updateableChildren(self) -> Iterable[Graphic]:
         return list(self._tiles)
+
+    def copyButtonEnabled(self) -> bool:
+        return self._copyable
+
+    def _copyButton(self) -> controls.ToolButtonGraphic:
+        if self._copy_button is None:
+            self._setupCopyButton()
+        return self._copy_button
+
+    def _setupCopyButton(self) -> None:
+        self._copy_button = controls.ToolButtonGraphic(self)
+        self._copy_button.setTransparent(True)
+        self._copy_button.setLabelMargins(QtCore.QMarginsF(0, 0, 0, 0))
+        self._copy_button.setToolTip("Copy text to clipboard")
+        self._copy_button.setGlyph(glyphs.MaterialIcons.content_copy)
+        self._copy_button.setFixedSize(QtCore.QSizeF(20, 20))
+        self._copy_button.setVisible(False)
+        self._copy_button.clicked.connect(self.copyContentsToClipboard)
+        self._copy_button.setZValue(100)
+
+    def _positionCopyButton(self) -> None:
+        visible = self._copyButtonVisible()
+        if not (self._copyable and visible):
+            return
+
+        rect = self.contentsRect()
+        button = self._copyButton()
+        size = button.effectiveSizeHint(Qt.PreferredSize, QtCore.QSizeF(-1, -1))
+        button_rect = util.alignedRectF(
+            self.layoutDirection(), self._copy_button_alignment, size, rect
+        )
+        button.setGeometry(button_rect)
+
+    def copyContentsToClipboard(self) -> None:
+        core.copyItemContentsToClipboard((self,))
+
+    def textToCopy(self) -> str:
+        text = "; ".join(tile.textToCopy() for tile in self._tiles)
+        return self._wrapTextToCopy(text)
+
+    def _wrapTextToCopy(self, text: str) -> str:
+        label_text = self.labelText()
+        if label_text:
+            text = f"{label_text}: {text}"
+        return text
+
+    def hoverEnterEvent(self, event: QtWidgets.QGraphicsSceneHoverEvent
+                        ) -> None:
+        super().hoverEnterEvent(event)
+        self._inside = True
+        self._updateCopyButtonVisibility()
+
+    def hoverLeaveEvent(self, event: QtWidgets.QGraphicsSceneHoverEvent
+                        ) -> None:
+        super().hoverLeaveEvent(event)
+        self._inside = False
+        self._updateCopyButtonVisibility()
+
+    def _copyButtonVisible(self) -> bool:
+        return self._inside and self.isSelected()
+
+    def _updateCopyButtonVisibility(self) -> None:
+        visible = self._copyButtonVisible()
+        # The button is created lazily, so don't create it just to hide it
+        if self._copy_button or visible:
+            self._copyButton().setVisible(visible)
+            self._positionCopyButton()
+
+    def textIsCopyable(self) -> bool:
+        return self._copyable
+
+    @settable(argtype=bool)
+    def setTextCopyable(self, enabled: bool) -> None:
+        self._copyable = enabled
+        if enabled:
+            self.setAcceptHoverEvents(enabled)
+            self.setSelectable(True)
+        self._updateCopyButtonVisibility()
+
+    @settable()
+    def setCopyButtonAlignment(self, alignment: Qt.AlignBottom) -> None:
+        self._copy_button_alignment = alignment
+        self._updateContents()
 
     @staticmethod
     def contentFont(family=FONT_FAMILY, size=converters.MEDIUM_TEXT_SIZE,
@@ -349,41 +440,6 @@ class Tile(core.RectangleGraphic):
     def addChild(self, tile: Tile) -> None:
         super().addChild(tile)
         self._tiles.append(tile)
-
-    @settable()
-    def setStyles(self, styles: dict[str, dict[str, Any]]) -> None:
-        self._styles = styles
-
-    def hasNamedStyle(self, name: str) -> bool:
-        if name in self._styles:
-            return True
-        parent = self.parentTile()
-        if parent:
-            return parent.hasNamedStyle(name)
-        else:
-            return False
-
-    def namedStyle(self, name: str) -> dict[str, Any]:
-        this_style = self._styles.get(name)
-        parent = self.parentTile()
-        if parent:
-            combined = parent.namedStyle(name)
-            if combined:
-                if this_style:
-                    combined.update(this_style)
-                return combined
-        return this_style
-
-    @settable("style")
-    def setStyleName(self, stylename: str) -> None:
-        parent = self.parentTile()
-        if parent:
-            if stylename:
-                style = parent.namedStyle(stylename)
-            else:
-                style = parent.namedStyle("*")
-            if style:
-                config.updateSettables(self, style)
 
     @classmethod
     def fromData(cls, data: dict[str, Any], parent: Tile = None,
@@ -450,10 +506,17 @@ class Tile(core.RectangleGraphic):
         return self._label_sticky
 
     @settable("label_sticky", argtype=bool)
-    def setLabelIsSticky(self, sticky: bool) -> None:
+    def setStickyLabel(self, sticky: bool) -> None:
         self._label_sticky = sticky
         if sticky:
             self.setFlag(self.ItemSendsScenePositionChanges, True)
+            self.setClipping(True)
+        self._updateTile()
+
+    def viewportChanged(self) -> None:
+        super().viewportChanged()
+        if self._label_sticky:
+            self._updateTile()
 
     def labelIsOverlayed(self) -> bool:
         return self._label_overlayed
@@ -462,25 +525,21 @@ class Tile(core.RectangleGraphic):
     def setLabelOverlayed(self, overlayed: bool):
         self._label_overlayed = overlayed
         self._updateLabelBgVisibility()
-        self.updateContents()
+        self._updateContents()
 
     @settable("label_bg", argtype=QtGui.QColor)
     def setLabelBackgroundColor(self, color: converters.ColorSpec):
         self.label().setFillColor(color)
 
-    @settable(argtype=QtGui.QColor)
-    def setLabelLineColor(self, color: QtGui.QColor):
-        self._line_color = color
-
     @settable(argtype=float)
     def setLabelLineWidth(self, width: float):
         self._line_width = width
 
-    @path_element(TileBackground, "bg")
-    def background(self) -> TileBackground:
+    @path_element(core.RectangleGraphic)
+    def background(self) -> core.RectangleGraphic:
         return self._bg
 
-    @path_element(TileLabel, "label")
+    @path_element(TileLabel)
     def label(self) -> TileLabel:
         return self._label
 
@@ -505,10 +564,11 @@ class Tile(core.RectangleGraphic):
         self._updateTile()
 
     def labelIsVisible(self) -> bool:
-        return self.label().isVisible()
+        return self._label_visible
 
     @settable()
     def setLabelVisible(self, visible: bool):
+        self._label_visible = visible
         self.label().setVisible(visible)
         self._updateTile()
 
@@ -540,23 +600,23 @@ class Tile(core.RectangleGraphic):
         self.updateGeometry()
         self._updateTile()
 
-    @settable(value_object_type=Graphic)
+    @settable(argtype=Graphic)
     def setLabelButton(self, button: Graphic, at_start=False) -> None:
         self.label().setLabelButton(button, at_start=at_start)
         self.updateGeometry()
 
-    @path_element(Graphic, "contents")
+    @path_element(Graphic)
     def contentItem(self) -> Graphic:
         return self._content
 
-    @settable("content_item", value_object_type=Graphic)
+    @settable("content_item", argtype=Graphic)
     def setContentItem(self, item: Optional[Graphic]) -> None:
         if item:
             if not item.objectName():
                 item.setObjectName(f"{self.objectName()}_content")
             item.setParentItem(self)
         self._content = item
-        self.updateContents()
+        self._updateContents()
 
     def contentWidget(self) -> Optional[QtWidgets.QWidget]:
         item = self.contentItem()
@@ -595,12 +655,17 @@ class Tile(core.RectangleGraphic):
         self._label_bg_visible = visible
         self._updateLabelBgVisibility()
 
+    @settable("label_bg_free", argtype=bool)
+    def setLabelBackgroundFree(self, free: bool) -> None:
+        self._label_bg_free = free
+        self._updateLabelBgVisibility()
+
     def _updateLabelBgVisibility(self) -> None:
         # If the background is turned off, also turn off the label background
         effective_vis = (self._label_bg_visible and
-                         self._bg.isVisible() and
+                         (self._bg.isVisible() or self._label_bg_free) and
                          not self.labelIsOverlayed())
-        self.label().setBackgrooundVisible(effective_vis)
+        self.label().setBackgroundVisible(effective_vis)
 
     def shape(self) -> QtGui.QPainterPath:
         if self._label_sticky:
@@ -619,11 +684,17 @@ class Tile(core.RectangleGraphic):
         rect = self.rect()
         vis_rect = self.mapRectFromScene(self.viewportRect())
         vis_rect.adjust(0.0, self._sticky_offset, 0.0, -self._sticky_offset)
-        sticky_rect = rect.intersected(vis_rect)
+
+        label_edge = self.labelEdge()
         min_h = self._stickyMinHeight()
-        if sticky_rect.isValid() and sticky_rect.height() < min_h:
-            sticky_rect.setTop(sticky_rect.bottom() - min_h)
-        return sticky_rect
+        if label_edge == Qt.TopEdge and rect.top() < vis_rect.top():
+            rect.setTop(vis_rect.top())
+            if rect.isValid() and rect.height() < min_h:
+                rect.setTop(rect.bottom() - min_h)
+        elif label_edge == Qt.BottomEdge and rect.bottom() > vis_rect.bottom():
+            rect.setBottom(vis_rect.bottom())
+
+        return rect
 
     def _stickyMinHeight(self) -> float:
         return self._labelHeight() * 2
@@ -681,7 +752,8 @@ class Tile(core.RectangleGraphic):
         label.setRotation(rotation)
 
     def _contentsRect(self) -> QtCore.QRectF:
-        # Returns the content area of the actual rect, wrt sticky label
+        # Returns the content area of the actual rect, (without regard to
+        # sticky label)
         rect = self.rect()
         if not rect.isValid():
             return rect
@@ -711,31 +783,19 @@ class Tile(core.RectangleGraphic):
             self._content_rect = self._contentsRect()
         return self._content_rect
 
-    # def _updateTile(self):
-    #     rect = self.rect()
-    #     self.background().setGeometry(rect)
-    #     self.setTransformOriginPoint(rect.center())
-    #     self._positionLabel(rect)
-    #     self._content_rect = self._contentsRect()
-    #     self.updateContents()
-    #     self.update()
-
     def _updateTile(self) -> None:
-        sticky = self.labelIsSticky()
         rect = self.rect()
         self.setTransformOriginPoint(rect.center())
-        if sticky:
-            vrect = self.stickyRect()
-        else:
-            vrect = rect
+        vrect = self.stickyRect() if self.labelIsSticky() else rect
         self.background().setGeometry(vrect)
         self._positionLabel(vrect)
 
         self._content_rect = self._contentsRect()
-        self.updateContents()
+        self._updateContents()
         self.update()
 
-    def updateContents(self):
+    def _updateContents(self):
+        self._positionCopyButton()
         if self._content:
             self._content.setGeometry(self.contentsRect())
 
@@ -780,7 +840,7 @@ class Tile(core.RectangleGraphic):
     def setInnerMargins(self, ms: QtCore.QMarginsF):
         super().setContentsMargins(ms)
         self._inner_margins = ms
-        self.updateContents()
+        self._updateContents()
 
     def ignoreMargins(self) -> bool:
         return self._ignore_margins
@@ -830,36 +890,6 @@ class Tile(core.RectangleGraphic):
     #     painter.drawRect(self.rect())
 
 
-@graphictype("sticky_label")
-class StickyLabelTile(Tile):
-    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
-        super().__init__(parent=parent)
-
-        self.setContentItem(controls.PlaceholderGraphic(self))
-        self._content.setFixedSize(QtCore.QSizeF(100, 100))
-        self._content.setClipsToParentShape(True)
-
-        self.setFlag(self.ItemSendsScenePositionChanges, True)
-
-    # def itemChange(self, change: QtWidgets.QGraphicsItem.GraphicsItemChange,
-    #                value: Any) -> Any:
-    #     if change == self.ItemScenePositionHasChanged:
-    #         self.updateContents()
-    #     elif change == self.ItemSceneChange:
-    #         old_scene = self.scene()
-    #         if old_scene:
-    #             old_scene.sceneRectChanged.disconnect(self._updateTile)
-    #         new_scene = cast(QtWidgets.QGraphicsScene, value)
-    #         new_scene.sceneRectChanged.connect(self._updateTile)
-    #     return super().itemChange(change, value)
-
-    # def paint(self, painter: QtGui.QPainter,
-    #           option: QtWidgets.QStyleOptionGraphicsItem,
-    #           widget: Optional[QtWidgets.QWidget]=None) -> None:
-    #     painter.setPen(Qt.green)
-    #     painter.drawRect(self.stickyRect())
-
-
 @graphictype("text")
 class TextTile(Tile):
     _font_family = FONT_FAMILY
@@ -868,15 +898,13 @@ class TextTile(Tile):
         super().__init__(parent=parent)
         self._text_selectable = True
         self._links_clickable = True
-        self._copy_button_enabled = True
-        self._copy_button_alignment = Qt.AlignBottom | Qt.AlignRight
         self._valuemap: dict[str, str] = {}
         self._formatter: Callable[[Any], str] = str
-        self._setupCopyButton()
         self.setContentItem(self._makeContentItem())
         self._hiliter: Optional[QtGui.QSyntaxHighlighter] = None
 
         self.setHasHeightForWidth(True)
+        self.setTextCopyable(True)
 
     def __del__(self):
         if self._hiliter:
@@ -896,47 +924,11 @@ class TextTile(Tile):
     def formatter(self) -> Callable[[Any], str]:
         return self._formatter
 
-    def copyButtonEnabled(self) -> bool:
-        return self._copy_button_enabled
-
-    def _setupCopyButton(self) -> None:
-        self._copy_button = controls.ToolButtonGraphic(self)
-        self._copy_button.setTransparent(True)
-        self._copy_button.setLabelMargins(QtCore.QMarginsF(0, 0, 0, 0))
-        self._copy_button.setToolTip("Copy text to clipboard")
-        self._copy_button.setGlyph(glyphs.MaterialIcons.content_copy)
-        self._copy_button.setFixedSize(QtCore.QSizeF(20, 20))
-        self._copy_button.setVisible(False)
-        self._copy_button.clicked.connect(self.copyContentsToClipboard)
-        self.setAcceptHoverEvents(self._copy_button_enabled)
-
-    @settable(argtype=bool)
-    def setCopyButtonEnabled(self, enabled: bool) -> None:
-        self._copy_button_enabled = enabled
-        self._copy_button.setVisible(enabled)
-        self.setAcceptHoverEvents(enabled)
-
-    @settable()
-    def setCopyButtonAlignment(self, alignment: Qt.AlignBottom) -> None:
-        self._copy_button_alignment = alignment
-        self.updateContents()
-
-    def copyContentsToClipboard(self) -> None:
-        text = self.textToCopy()
-        clipboard = QtGui.QGuiApplication.clipboard()
-        clipboard.setText(text)
-
     def textToCopy(self) -> str:
         item = cast(controls.TextGraphic, self.contentItem())
         text = item.plainText()
         text.replace(formatting.NEGATIVE_CHAR, "-")
-        return text
-
-    def hoverEnterEvent(self, event: QtWidgets.QGraphicsSceneHoverEvent) -> None:
-        self._copy_button.show()
-
-    def hoverLeaveEvent(self, event: QtWidgets.QGraphicsSceneHoverEvent) -> None:
-        self._copy_button.hide()
+        return self._wrapTextToCopy(text)
 
     @settable("text_align", argtype=Qt.Alignment)
     def setTextAlignment(self, align: Qt.Alignment):
@@ -944,9 +936,7 @@ class TextTile(Tile):
 
     @settable(converter=converters.textSizeConverter)
     def setTextSize(self, size: int) -> None:
-        font = QtGui.QFont()
-        font.setPixelSize(size)
-        self.contentItem().setFont(font)
+        self.contentItem().setTextSize(size)
 
     def textSize(self) -> int:
         return self.contentItem().font().pixelSize()
@@ -962,9 +952,7 @@ class TextTile(Tile):
     @settable(argtype=QtGui.QFont.Weight)
     def setTextWeight(self, weight: int):
         w = self.contentItem()
-        font = w.font()
-        font.setWeight(weight)
-        w.setFont(font)
+        w.setWeight(weight)
 
     @settable()
     def setTextFamily(self, name: str):
@@ -998,6 +986,10 @@ class TextTile(Tile):
         if isinstance(content, controls.TextGraphic):
             content.setLinksClickable(clickable)
 
+    @settable(argtype=bool)
+    def setWordWrap(self, wrap: bool) -> None:
+        self.contentItem().setWordWrap(wrap)
+
     @settable()
     def setSyntaxColoring(self,
         hiliter: str | QtGui.QSyntaxHighlighter | type[QtGui.QSyntaxHighlighter]
@@ -1012,18 +1004,7 @@ class TextTile(Tile):
         self._hiliter = hiliter
         self._hiliter.setDocument(doc)
 
-    def _positionCopyButton(self) -> None:
-        if not self._copy_button_enabled:
-            return
-        rect = self.contentsRect()
-        size = self._copy_button.effectiveSizeHint(Qt.PreferredSize,
-                                                   QtCore.QSizeF(-1, -1))
-        button_rect = util.alignedRectF(
-            self.layoutDirection(), self._copy_button_alignment, size, rect
-        )
-        self._copy_button.setGeometry(button_rect)
-
-    def updateContents(self):
+    def _updateContents(self):
         rect = self.contentsRect()
         content = self.contentItem()
         if content:
@@ -1064,54 +1045,87 @@ class TextTile(Tile):
 @graphictype("notice")
 class NoticeTile(TextTile):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
-        self._icon: controls.StringGraphic = controls.StringGraphic()
+        self._icon: Union[controls.StringGraphic, controls.PixmapGraphic] = \
+            controls.StringGraphic()
+        self._icon.setObjectName("notice_icon")
         self._orientation = Qt.Horizontal
         self._gap = 10.0
-        self._icon_alignment = Qt.AlignTop | Qt.AlignLeft
         self._text_before_icon = False
+        self._icon_size = QtCore.QSizeF(18, 18)
         super().__init__(parent)
-        self._glyph_size = 18
+        self._glyph_text_size = 14
+        self._glyph_color: Optional[converters.ColorSpec] = None
         self.setLabelVisible(False)
+
         self._icon.setParentItem(self)
+        self._icon_alignment = self._icon.textAlignment()
+        self.setIconAlignment(Qt.AlignTop | Qt.AlignRight)
 
     def __repr__(self):
         content: controls.TextGraphic = self._content
         return (f"<{type(self).__name__} {id(self):x} {self.objectName()!r} "
                 f"{content.plainText()!r}>")
 
-    @path_element(controls.StringGraphic, "icon")
-    def iconItem(self) -> Optional[controls.StringGraphic]:
+    @path_element(Graphic)
+    def iconItem(self) -> Union[controls.StringGraphic, controls.PixmapGraphic]:
+        return self._icon
+
+    @path_element(controls.StringGraphic)
+    def glyphItem(self) -> controls.StringGraphic:
+        if not isinstance(self._icon, controls.StringGraphic):
+            self._icon = controls.StringGraphic(self)
+            self._icon.setTextSize(self._glyph_text_size)
+            self._icon.setTextAlignment(Qt.AlignCenter)
+            self._icon.setFixedSize(self._icon_size)
+            if self._glyph_color:
+                self._icon.setTextColor(self._glyph_color)
         return self._icon
 
     def setGlyph(self, glyph: glyphs.Glyph) -> None:
         self.prepareGeometryChange()
-        self._icon.setGlyph(glyph)
-        self._icon.setTextSize(self._glyph_size)
+        self.glyphItem().setGlyph(glyph)
+        self.glyphItem().setTextSize(self._glyph_text_size)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
+
+    @path_element(controls.PixmapGraphic)
+    def pixmapItem(self) -> controls.PixmapGraphic:
+        if not isinstance(self._icon, controls.PixmapGraphic):
+            self._icon = controls.PixmapGraphic(self)
+            self._icon.setSize(self._icon_size)
+        return self._icon
+
+    @settable("image")
+    def setImagePath(self, path: pathlib.Path | str) -> None:
+        self.pixmapItem().setPath(path)
+
+    def setIcon(self, icon: QtGui.QIcon) -> None:
+        self.pixmapItem().setIcon(icon)
+
+    @settable("houdini_icon")
+    def setHoudiniIcon(self, name: str):
+        self.pixmapItem().setHoudiniIcon(name)
 
     @settable("glyph")
     def setGlyphName(self, name: str) -> None:
-        self.prepareGeometryChange()
-        self._icon.setGlyphName(name)
-        self.updateGeometry()
-        self.updateContents()
+        self.glyphItem().setGlyphName(name)
 
     @settable("glyph_size", converter=converters.textSizeConverter)
     def setGlyphSize(self, size: int) -> None:
-        self._glyph_size = size
-        self.prepareGeometryChange()
-        self._icon.setTextSize(size)
-        self.updateGeometry()
-        self.updateContents()
+        self._glyph_text_size = size
+        icon = self.iconItem()
+        if isinstance(icon, controls.StringGraphic):
+            self.prepareGeometryChange()
+            icon.setTextSize(size)
+            self.updateGeometry()
+            self._updateContents()
 
     @settable("glyph_color", argtype=QtGui.QColor)
     def setGlyphColor(self, color: converters.ColorSpec) -> None:
-        self._icon.setTextColor(color)
-
-    @settable()
-    def setText(self, html: str) -> None:
-        super().setText(html)
+        self._glyph_color = color
+        icon = self.iconItem()
+        if isinstance(icon, controls.StringGraphic):
+            icon.setTextColor(color)
 
     @settable()
     def setNoticeType(self, type_name: str) -> None:
@@ -1119,6 +1133,7 @@ class NoticeTile(TextTile):
         self.setGlyph(style.glyph)
         self.setGlyphColor(style.color)
         self.setTextColor(style.color)
+        self.update()
 
     def orientation(self) -> Qt.Orientation:
         return self._orientation
@@ -1126,13 +1141,22 @@ class NoticeTile(TextTile):
     @settable(argtype=Qt.Orientation)
     def setOrientation(self, orient: Qt.Orientation) -> None:
         self._orientation = orient
-        self.updateContents()
+        self._updateContents()
 
     @settable(argtype=Qt.Alignment)
-    def setIconAlignment(self, align: Qt.Alignment):
+    def setIconAlignment(self, align: Qt.Alignment) -> None:
         self._icon_alignment = align
         if self._icon:
             self._icon.setTextAlignment(align)
+        self.updateGeometry()
+        self._updateContents()
+
+    @settable()
+    def setSpacing(self, gap: float) -> None:
+        self.prepareGeometryChange()
+        self._gap = gap
+        self.updateGeometry()
+        self._updateContents()
 
     def isTextBeforeIcon(self) -> bool:
         return self._text_before_icon
@@ -1140,28 +1164,29 @@ class NoticeTile(TextTile):
     @settable(argtype=bool)
     def setTextBeforeIcon(self, reverse: bool) -> None:
         self._text_before_icon = reverse
-        self.updateContents()
+        self._updateContents()
 
     @settable(argtype=QtCore.QMarginsF)
     def setIconMargins(self, margins: QtCore.QMarginsF) -> None:
         self.prepareGeometryChange()
         self.iconItem().setMargins(margins)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
-    @settable()
-    def setIconSize(self, size: int) -> None:
+    @settable(argtype=QtCore.QSizeF)
+    def setIconSize(self, size: QtCore.QSizeF) -> None:
+        self._icon_size = size
         self.prepareGeometryChange()
-        self.iconItem().setTextSize(size)
+        self.iconItem().setSize(size)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     @settable(argtype=QtCore.QMarginsF)
     def setTextMargins(self, margins: QtCore.QMarginsF) -> None:
         self.prepareGeometryChange()
         self.textItem().setMargins(margins)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     def _contentSizeHint(self, which: Qt.SizeHint,
                          constraint: QtCore.QSizeF = None) -> QtCore.QSizeF:
@@ -1176,38 +1201,40 @@ class NoticeTile(TextTile):
                                          QtCore.QSizeF(cw, constraint.height()))
         if not horiz:
             csize.setHeight(csize.height() + icon_size.height() + self._gap)
+        if csize.height() > -1 and csize.height() < icon_size.height():
+            csize.setHeight(icon_size.height())
         return csize
 
-    def updateContents(self) -> None:
+    def _updateContents(self) -> None:
         icon = self.iconItem()
         if not icon:
-            return super().updateContents()
+            return super()._updateContents()
 
         rect = self.contentsRect()
         text = self.contentItem()
         horiz = self.orientation() == Qt.Horizontal
         rev_order = self.isTextBeforeIcon()
-        icon_size = icon.implicitSize()
         if horiz:
-            iw = icon_size.width()
-            tw = rect.width() - iw - self._gap
+            space = self._icon_size.width()
+            tw = rect.width() - space - self._gap
             y = rect.y()
             h = rect.height()
-            ix = rect.rigtht() - iw if rev_order else rect.x()
-            tx = rect.x() if rev_order else ix + iw + self._gap
-            icon_rect = QtCore.QRectF(ix, y, iw, h)
+            ix = rect.rigtht() - space if rev_order else rect.x()
+            tx = rect.x() if rev_order else ix + space + self._gap
+            icon_rect = QtCore.QRectF(ix, y, space, h)
             text_rect = QtCore.QRectF(tx, y, tw, h)
         else:
-            ih = icon_size.height()
-            th = rect.height() - ih - self._gap
+            space = self._icon_size.height()
+            th = rect.height() - space - self._gap
             x = rect.x()
             w = rect.width()
-            iy = rect.bottom() - ih if rev_order else rect.y()
-            ty = rect.y() if rev_order else iy + ih + self._gap
-            icon_rect = QtCore.QRectF(x, iy, w, ih)
+            iy = rect.bottom() - space if rev_order else rect.y()
+            ty = rect.y() if rev_order else iy + space + self._gap
+            icon_rect = QtCore.QRectF(x, iy, w, space)
             text_rect = QtCore.QRectF(x, ty, w, th)
         icon.setGeometry(icon_rect)
         text.setGeometry(text_rect)
+        self._positionCopyButton()
 
 
 @graphictype("number")
@@ -1223,16 +1250,16 @@ class NumberTile(TextTile):
 
     def textToCopy(self) -> str:
         if self._value is not None:
-            return str(self._value)
+            return self._wrapTextToCopy(str(self._value))
         else:
             return super().textToCopy()
+
+    def formatter(self) -> formatting.NumberFormatter:
+        return self._formatter
 
     @settable(converter=converters.formatConverter)
     def setFormatter(self, formatter: formatting.NumberFormatter):
         self._formatter = formatter
-
-    def formatter(self) -> formatting.NumberFormatter:
-        return self._formatter
 
     @settable(argtype=int)
     def setDecimalPlaces(self, places: int):
@@ -1251,14 +1278,14 @@ class NumberTile(TextTile):
         self.prepareGeometryChange()
         self.formatter().setWholeWeight(weight)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     @settable()
     def setFractionPartWeight(self, weight: int | str) -> None:
         self.prepareGeometryChange()
         self.formatter().setFractionWeight(weight)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     @settable()
     def setValue(self, value: Union[str, int, float, None]):
@@ -1310,7 +1337,7 @@ class TupleTile(NumberTile):
         for item in self._items:
             item.setFont(font)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     @settable()
     def setTextFamily(self, name: str):
@@ -1320,7 +1347,7 @@ class TupleTile(NumberTile):
         for item in self._items:
             item.setFont(font)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     @settable("text_color", argtype=QtGui.QColor)
     def setTextColor(self, color: QtGui.QColor) -> None:
@@ -1332,10 +1359,11 @@ class TupleTile(NumberTile):
         self.prepareGeometryChange()
         self._items = [self._makeTupleItem() for _ in range(length)]
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     def textToCopy(self) -> str:
-        return ", ".join(str(item.number()) for item in self._items)
+        text = "; ".join(str(item.number()) for item in self._items)
+        return self._wrapTextToCopy(f"[{text}]")
 
     @settable(converter=converters.formatConverter)
     def setFormatter(self, formatter: formatting.NumberFormatter):
@@ -1344,7 +1372,7 @@ class TupleTile(NumberTile):
         for item in self._items:
             item.setFormatter(self._formatter)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     def formatter(self) -> formatting.NumberFormatter:
         return self._formatter
@@ -1354,14 +1382,14 @@ class TupleTile(NumberTile):
         self.prepareGeometryChange()
         self.formatter().setDecimalPlaces(places)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     @settable("brief")
     def setBriefMode(self, brief: formatting.BriefMode):
         self.prepareGeometryChange()
         self.formatter().setBriefMode(brief)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     def setTextSelectable(self, selectable: bool) -> None:
         for item in self._items:
@@ -1386,7 +1414,7 @@ class TupleTile(NumberTile):
             self._items[i].setNumber(value)
 
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     def _contentSizeHint(self, which: Qt.SizeHint,
                          constraint: QtCore.QSizeF = None) -> QtCore.QSizeF:
@@ -1401,7 +1429,7 @@ class TupleTile(NumberTile):
             return QtCore.QSizeF(w, h)
         return constraint
 
-    def updateContents(self):
+    def _updateContents(self):
         rect = self.contentsRect()
         count = len(self._items)
         if not count:
@@ -1509,7 +1537,7 @@ class ExplodedMatrix(TextTile):
 
     def textToCopy(self) -> str:
         if self._value:
-            return str(self._value)
+            return self._wrapTextToCopy(str(self._value))
         else:
             return ""
 
@@ -1522,7 +1550,7 @@ class ExplodedMatrix(TextTile):
             for item in row:
                 item.setFont(font)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     @settable()
     def setValue(self, matrix: hou.Matrix4) -> None:
@@ -1566,7 +1594,7 @@ class ExplodedMatrix(TextTile):
             label_w = max(label_w, row[0].implicitSize().width())
         self._labels_width = label_w
 
-    def updateContents(self):
+    def _updateContents(self):
         rect = self.contentsRect()
         h_space = self._spacing.width()
         v_space = self._spacing.height()
@@ -1625,7 +1653,7 @@ class MathMatrix(TextTile):
 
     def textToCopy(self) -> str:
         if self._value:
-            return str(self._value)
+            return self._wrapTextToCopy(str(self._value))
         else:
             return ""
 
@@ -1638,7 +1666,7 @@ class MathMatrix(TextTile):
             for item in row:
                 item.setFont(font)
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     @settable()
     def setValue(self, matrix: hou.Matrix4) -> None:
@@ -1671,7 +1699,7 @@ class MathMatrix(TextTile):
             size = constraint
         return size
 
-    def updateContents(self):
+    def _updateContents(self):
         rect = self.contentsRect()
         h_space = self._spacing.width()
         v_space = self._spacing.height()
@@ -1696,15 +1724,43 @@ class PathTile(TextTile):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
         self._weight: Union[str, int] = 700
+        self._collapse = False
+        self._vars = ("HIP", "JOB", "HOME")
+        self._path_str: str = ""
 
     @settable()
     def setFilenameWeight(self, weight: Union[str, int]):
         self._weight = weight
+        self._updateText()
 
     @settable()
-    def setValue(self, text: str):
-        text = self._valuemap.get(text, text)
-        html = formatting.markup_path(text, filename_weight=self._weight)
+    def setCollapseCommonVars(self, collapse: bool) -> None:
+        self._collapse = collapse
+        self._updateText()
+
+    @settable()
+    def setCommonVars(self, var_names: str | Iterable[str]):
+        if isinstance(var_names, str):
+            var_names = var_names.split()
+        self._vars = tuple(vn.removeprefix("$") for vn in var_names)
+        self._updateText()
+
+    @settable()
+    def setValue(self, path_str: str):
+        path_str = path_str or ""
+        self._path_str = self._valuemap.get(path_str, path_str)
+        self._updateText()
+
+    def _updateText(self) -> None:
+        path = pathlib.PurePosixPath(self._path_str)
+        if self._collapse:
+            for vname in self._vars:
+                if vname in os.environ:
+                    vpath = pathlib.PurePosixPath(os.environ[vname])
+                    if path.is_relative_to(vpath):
+                        path = f"${vname}" / path.relative_to(vpath)
+                        break
+        html = formatting.markup_path(str(path), filename_weight=self._weight)
         self.setText(html)
 
 
@@ -1783,6 +1839,9 @@ class ContainerTile(Tile):
         self.setLabelVisible(False)
         self.setIgnoreMargins(True)
 
+    def localEnv(self) -> dict[str, Any]:
+        return self._content.localEnv()
+
     def prepChild(self, child: Graphic, data: dict[str, Any]) -> None:
         if self._itemstyle and "style" not in data:
             data["style"] = self._itemstyle
@@ -1810,6 +1869,7 @@ class LayoutTile(ContainerTile):
         self._content.installEventFilter(self)
 
         self.setHasHeightForWidth(True)
+        self.setSelectable(False)
 
     def sizesToChildren(self) -> bool:
         return self._sizes_to_children
@@ -1829,19 +1889,24 @@ class LayoutTile(ContainerTile):
                          constraint: QtCore.QSizeF = None) -> QtCore.QSizeF:
         return util.validSizeHint(self._content, which, constraint)
 
-    def _makeLayout(self) -> QtWidgets.QGraphicsLayout:
+    def _makeArrangement(self) -> layouts.Arrangement:
         raise NotImplementedError
+
+    def _makeLayout(self) -> QtWidgets.QGraphicsLayout:
+        arr = self._makeArrangement()
+        return layouts.ArrangementLayout(arr)
+        # return QtWidgets.QGraphicsLinearLayout(self.default_orientation)
 
     def addChild(self, item: QtWidgets.QGraphicsLayoutItem):
         self._content.addChild(item)
         self._tiles.append(item)
 
-    @path_element(QtWidgets.QGraphicsLayout, "layout")
+    @path_element(QtWidgets.QGraphicsLayout)
     def contentLayout(self) -> QtWidgets.QGraphicsLayout:
         return self._content.layout()
 
-    @path_element(layouts.Arrangement, "arrangement")
-    def contentArrangement(self) -> layouts.Arrangement:
+    @path_element(layouts.Arrangement)
+    def arrangement(self) -> layouts.Arrangement:
         layout = self.contentLayout()
         if isinstance(layout, layouts.ArrangementLayout):
             return layout.arrangement()
@@ -1849,7 +1914,12 @@ class LayoutTile(ContainerTile):
     @settable("margins", argtype=QtCore.QMarginsF)
     def setMargins(self, left: Union[QtCore.QMarginsF, float], top=0.0,
                    right=0.0, bottom=0.0) -> None:
-        super().setContentsMargins(left, top, right, bottom)
+        if isinstance(left, QtCore.QMarginsF):
+            ms = left
+            super().setContentsMargins(ms.left(), ms.top(),
+                                       ms.right(), ms.bottom())
+        else:
+            super().setContentsMargins(left, top, right, bottom)
 
     def sizeHint(self, which: Qt.SizeHint, constraint: QtCore.QSizeF = None
                  ) -> QtCore.QSizeF:
@@ -1939,57 +2009,93 @@ class GridLayoutTile(LayoutTile):
 class LinearLayoutTile(LayoutTile):
     default_orientation = Qt.Vertical
 
-    property_aliases = {
-        "h_space": "arrangement.h_space",
-        "v_space": "arrangement.v_space",
-        "spacing": "arrangement.spacing",
-        "orientation": "arrangement.orientation",
-        "justify": "arrangement.justify",
-        "align": "arrangement.align"
-    }
     # property_aliases = {
-    #     "h_space": "layout.h_space",
-    #     "v_space": "layout.v_space",
-    #     "justify": "layout.justify",
-    #     "align": "layout.align"
+    #     "h_space": "arrangement.h_space",
+    #     "v_space": "arrangement.v_space",
+    #     "spacing": "arrangement.spacing",
+    #     "orientation": "arrangement.orientation",
+    #     "justify": "arrangement.justify",
+    #     "align": "arrangement.align"
     # }
+    property_aliases = {
+        "h_space": "contentLayout.h_space",
+        "v_space": "contentLayout.v_space",
+        "align": "contentLayout.align"
+    }
 
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
-        self._shrink_factors: dict[int, float] = {}
 
-    def _makeArrangement(self) -> layouts.Arrangement:
-        arr = layouts.LinearArrangement()
-        arr.setMargins(0, 0, 0, 0)
-        return arr
+    # def _makeArrangement(self) -> layouts.Arrangement:
+    #     arr = layouts.LinearArrangement()
+    #     arr.setMargins(0, 0, 0, 0)
+    #     return arr
 
     def _makeLayout(self) -> QtWidgets.QGraphicsLayout:
-        arr = self._makeArrangement()
-        return layouts.ArrangementLayout(arr)
-        # return QtWidgets.QGraphicsLinearLayout(self.default_orientation)
+        # arr = self._makeArrangement()
+        # return layouts.ArrangementLayout(arr)
+        return QtWidgets.QGraphicsLinearLayout(self.default_orientation)
 
-    # @settable(argtype=Qt.Orientation)
-    # def setOrientation(self, orient: Qt.Orientation) -> None:
-    #     self.contentLayout().setOrientation(orient)
-    #
-    # @settable()
-    # def setSpacing(self, spacing: float) -> None:
-    #     self.contentLayout().setSpacing(spacing)
+    @settable(argtype=Qt.Orientation)
+    def setOrientation(self, orient: Qt.Orientation) -> None:
+        self.contentLayout().setOrientation(orient)
+
+    @settable()
+    def setSpacing(self, spacing: float) -> None:
+        self.contentLayout().setSpacing(spacing)
 
     @settable("line:stretch", is_parent_method=True)
     def setChildStretch(self, tile: Tile, factor: float) -> None:
-        # self.contentLayout().setStretchFactor(tile, factor)
-        self.contentArrangement().setStretchFactor(tile, factor)
+        self.contentLayout().setStretchFactor(tile, factor)
+        # self.contentArrangement().setStretchFactor(tile, factor)
 
-    @settable("line:shrink", is_parent_method=True)
-    def setChildShrink(self, child: Graphic, factor: float) -> None:
-        self._shrink_factors[id(child)] = factor
+    @settable("justify")
+    def setJustification(self, justify) -> None:
+        pass
 
     # def paint(self, painter: QtGui.QPainter,
     #           option: QtWidgets.QStyleOptionGraphicsItem,
     #           widget: Optional[QtWidgets.QWidget] = None) -> None:
     #     painter.setPen(Qt.red)
     #     painter.drawRect(self.rect())
+
+
+@graphictype("split")
+class SplitTile(LayoutTile):
+    property_aliases = {
+        "h_space": "arrangement.h_space",
+        "v_space": "arrangement.v_space",
+        "spacing": "arrangement.spacing",
+    }
+
+    def __init__(self, parent: QtWidgets.QGraphicsWidget = None):
+        super().__init__(parent=parent)
+        self.setBackgroundVisible(False)
+        self.setLabelVisible(False)
+        self.setHasHeightForWidth(True)
+
+    def _makeArrangement(self) -> layouts.Arrangement:
+        arr = layouts.SplitArrangement()
+        arr.setMargins(0, 0, 0, 0)
+        return arr
+
+    def breakWidth(self) -> float:
+        if self._breakwidth > 0:
+            return self._breakwidth
+        else:
+            return self.chartSize() * 3
+
+    @settable()
+    def setBreakWidth(self, width: float):
+        self.arrangement().setBreakWidth(width)
+
+    @settable("h_split")
+    def setHorizontalSplit(self, factor: float) -> None:
+        self.arrangement().setHorizontalSplit(factor)
+
+    @settable()
+    def setSideWidth(self, width: float) -> None:
+        self.arrangement().setSideWidth(width)
 
 
 @graphictype("card")
@@ -2027,7 +2133,7 @@ class CardTile(LinearLayoutTile):
         return self._descendentCardCount(self)
 
     @staticmethod
-    def depthToColor(depth: int|str) -> converters.ColorSpec:
+    def depthToColor(depth: int | str) -> converters.ColorSpec:
         if depth == "lowest" or depth == -2:
             c = ThemeColor.surface_lowest
         elif depth == "low" or depth == -1:
@@ -2058,7 +2164,7 @@ class CardTile(LinearLayoutTile):
         return depth
 
     @settable()
-    def setDepth(self, depth: int|str) -> None:
+    def setDepth(self, depth: int | str) -> None:
         bg = self.background()
         c = self.depthToColor(depth)
         bg.setFillColor(c)
@@ -2085,7 +2191,7 @@ class MatrixTile(LayoutTile):
 
     @path_element(layouts.Matrix)
     def matrix(self) -> layouts.Matrix:
-        return self.contentArrangement()
+        return self.arrangement()
 
 
 @graphictype("flow")
@@ -2112,7 +2218,7 @@ class FlowTile(LayoutTile):
 
     @path_element(layouts.FlowArrangement)
     def flow(self) -> layouts.FlowArrangement:
-        return self.contentArrangement()
+        return self.arrangement()
 
 
 @graphictype("packed_grid")
@@ -2142,7 +2248,7 @@ class PackedGridTile(LayoutTile):
 
     @path_element(layouts.PackedGridArrangement)
     def grid(self) -> layouts.PackedGridArrangement:
-        return self.contentArrangement()
+        return self.arrangement()
 
     @settable("max_cols", argtype=int)
     def setMaximumColumns(self, cols: int):
@@ -2156,19 +2262,19 @@ class PackedGridTile(LayoutTile):
 
     @settable("grid:pos", argtype=QtCore.QPoint, is_parent_method=True)
     def setChildPos(self, tile: Tile, pos: QtCore.QPoint) -> None:
-        self.contentArrangement().setItemPos(tile, pos)
+        self.arrangement().setItemPos(tile, pos)
 
     @settable("grid:cols", argtype=int, is_parent_method=True)
     def setChildColumnSpan(self, tile: Tile, cols: int) -> None:
-        self.contentArrangement().setItemColumnSpan(tile, cols)
+        self.arrangement().setItemColumnSpan(tile, cols)
 
     @settable("grid:rows", argtype=int, is_parent_method=True)
     def setChildRowSpan(self, tile: Tile, rows: int) -> None:
-        self.contentArrangement().setItemRowSpan(tile, rows)
+        self.arrangement().setItemRowSpan(tile, rows)
 
     @settable("grid:spans", argtype=QtCore.QSize, is_parent_method=True)
     def setChildSpans(self, tile: Tile, spans: QtCore.QSize) -> None:
-        self.contentArrangement().setItemSpans(tile, spans)
+        self.arrangement().setItemSpans(tile, spans)
 
     def sizeHint(self, which: Qt.SizeHint, constraint: QtCore.QSizeF = None
                  ) -> QtCore.QSizeF:
@@ -2199,21 +2305,45 @@ class PackedGridTile(LayoutTile):
 
 
 class DataLayoutTile(ContainerTile):
+    contentSizeChanged = QtCore.Signal()
+
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
+        self.setHasHeightForWidth(True)
+
         self._visible = True
         self.setContentItem(views.DataLayoutGraphic(self))
         self._content.setArrangement(self._makeArrangement())
         self._content.visibleChanged.connect(self._updateVisibility)
+        self._content.geometryChanged.connect(self._onContentSizeChanged)
+        self._content.installEventFilter(self)
+        self.setTextCopyable(True)
 
-    def dataProxy(self) -> Optional[Graphic]:
+    def textToCopy(self) -> str:
+        return self._wrapTextToCopy(self._content.textToCopy())
+
+    def _onContentSizeChanged(self) -> None:
+        self.prepareGeometryChange()
+        self.contentSizeChanged.emit()
+        self.updateGeometry()
+
+    def eventFilter(self, watched: QtWidgets.QGraphicsWidget,
+                    event: QtCore.QEvent) -> bool:
+        if watched == self._content and event.type() == event.LayoutRequest:
+            self._onContentSizeChanged()
+        return super().eventFilter(watched, event)
+
+    def dataProxy(self) -> Optional[core.DataGraphic]:
         return self._content
+
+    def localEnv(self) -> dict[str, Any]:
+        return super().localEnv() | {"model": self.dataProxy().model()}
 
     def _makeArrangement(self) -> layouts.Arrangement:
         raise NotImplementedError
 
-    @path_element(layouts.Arrangement, "layout")
-    def contentArrangement(self) -> layouts.Arrangement:
+    @path_element(layouts.Arrangement)
+    def arrangement(self) -> layouts.Arrangement:
         return self._content.arrangement()
 
     @settable()
@@ -2232,16 +2362,20 @@ class DataLayoutTile(ContainerTile):
         if visible != cur_vis:
             super().setVisible(visible)
 
+    def _contentSizeHint(self, which: Qt.SizeHint,
+                         constraint: QtCore.QSizeF = None) -> QtCore.QSizeF:
+        return util.validSizeHint(self._content, which, constraint)
+
 
 @graphictype("data_line")
 class DataLineTile(DataLayoutTile):
     property_aliases = {
-        "h_space": "layout.h_space",
-        "v_space": "layout.v_space",
-        "spacing": "layout.spacing",
-        "orientation": "layout.orientation",
-        "justify": "layout.justify",
-        "align": "layout.align"
+        "h_space": "arrangement.h_space",
+        "v_space": "arrangement.v_space",
+        "spacing": "arrangement.spacing",
+        "orientation": "arrangement.orientation",
+        "justify": "arrangement.justify",
+        "align": "arrangement.align"
     }
 
     def _makeArrangement(self) -> layouts.Arrangement:
@@ -2252,15 +2386,16 @@ class DataLineTile(DataLayoutTile):
 @graphictype("data_matrix")
 class DataMatrixTile(DataLayoutTile):
     property_aliases = {
-        "h_space": "layout.h_space",
-        "v_space": "layout.v_space",
-        "spacing": "layout.spacing",
-        "margins": "layout.margins",
-        "min_column_width": "layout.min_column_width",
-        "max_column_width": "layout.max_column_width",
-        "row_height": "layout.row_height",
-        "orientation": "layout.orientation",
-        "column_stretch": "layout.column_stretch",
+        "h_space": "matrix.h_space",
+        "v_space": "matrix.v_space",
+        "spacing": "matrix.spacing",
+        "margins": "matrix.margins",
+        "min_column_width": "matrix.min_column_width",
+        "max_column_width": "matrix.max_column_width",
+        "row_height": "matrix.row_height",
+        "orientation": "matrix.orientation",
+        "column_stretch": "matrix.column_stretch",
+        "fill_stretch": "matrix.fill_stretch",
     }
 
     def _makeArrangement(self) -> layouts.Arrangement:
@@ -2269,7 +2404,7 @@ class DataMatrixTile(DataLayoutTile):
 
     @path_element(layouts.Matrix)
     def matrix(self) -> layouts.Matrix:
-        return self.contentArrangement()
+        return self.arrangement()
 
     # def paint(self, painter: QtGui.QPainter,
     #           option: QtWidgets.QStyleOptionGraphicsItem,
@@ -2281,19 +2416,19 @@ class DataMatrixTile(DataLayoutTile):
 @graphictype("data_key_value")
 class DataKeyValueTile(DataLayoutTile):
     property_aliases = {
-        "h_space": "layout.h_space",
-        "v_space": "layout.v_space",
-        "spacing": "layout.spacing",
-        "margins": "layout.margins",
+        "h_space": "arrangement.h_space",
+        "v_space": "arrangement.v_space",
+        "spacing": "arrangement.spacing",
+        "margins": "arrangement.margins",
     }
 
     @settable()
     def setKeyItemName(self, name: str) -> None:
-        self.contentArrangement().setKeyItemName(name)
+        self.arrangement().setKeyItemName(name)
 
     @settable()
     def setValueItemName(self, name: str) -> None:
-        self.contentArrangement().setValueItemName(name)
+        self.arrangement().setValueItemName(name)
 
     def _makeArrangement(self) -> layouts.Arrangement:
         return layouts.KeyValueArrangement()
@@ -2303,7 +2438,6 @@ class DataKeyValueTile(DataLayoutTile):
     #           widget: Optional[QtWidgets.QWidget] = None) -> None:
     #     painter.setPen(Qt.red)
     #     painter.drawRect(self.rect())
-
 
 
 @graphictype("choice")
@@ -2336,20 +2470,28 @@ class ChoiceTile(ContainerTile):
 @graphictype("list")
 class ListTile(Tile):
     property_aliases = {
-        "use_sections": "contents.use_sections",
-        "section_key": "contents.section_key",
-        "measure_values": "contents.measure_values",
-        "dynamic_item_width": "contents.dynamic_item_width",
-        "prewarm": "contents.prewarm",
-        "h_space": "contents.h_space",
-        "v_space": "contents.v_space",
-        "spacing": "contents.spacing",
+        "use_sections": "contentsItem.use_sections",
+        "section_key": "contentsItem.section_key",
+        "measure_values": "contentsItem.measure_values",
+        "dynamic_item_width": "contentsItem.dynamic_item_width",
+        "on_copy_item_text": "contentsItem.on_copy_item_text",
+        "prewarm": "contentsItem.prewarm",
+        "h_space": "matrix.h_space",
+        "v_space": "matrix.v_space",
+        "spacing": "matrix.spacing",
+        "margins": "matrix.margins",
+        "min_column_width": "matrix.min_column_width",
+        "max_column_width": "matrix.max_column_width",
+        "row_height": "matrix.row_height",
+        "orientation": "matrix.orientation",
+        "column_stretch": "matrix.column_stretch",
+        "fill_stretch": "matrix.fill_stretch",
     }
 
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent=parent)
         # self.setContentItem(views.ListView(self))
-        self.setContentItem(views.DataListGraphic(self))
+        self.setContentItem(self._makeContentItem())
         self._visible = True
 
         self.setHasHeightForWidth(True)
@@ -2357,10 +2499,14 @@ class ListTile(Tile):
         self._content.visibleChanged.connect(self._updateVisibility)
 
         self._content.installEventFilter(self)
+        self.setTextCopyable(True)
+
+    def _makeContentItem(self) -> Graphic:
+        return views.DataListGraphic(self)
 
     def setGeometry(self, rect):
         super().setGeometry(rect)
-        self.updateContents()
+        self._updateContents()
 
     def eventFilter(self, watched: QtWidgets.QGraphicsWidget,
                     event: QtCore.QEvent) -> bool:
@@ -2370,7 +2516,7 @@ class ListTile(Tile):
             # self.updateContents()
         return super().eventFilter(watched, event)
 
-    def updateContents(self):
+    def _updateContents(self):
         if self._content:
             crect = self.contentsRect()
             self._content.setGeometry(crect)
@@ -2378,14 +2524,17 @@ class ListTile(Tile):
     def dataProxy(self) -> Optional[Graphic]:
         return self._content
 
+    def textToCopy(self) -> str:
+        return self._wrapTextToCopy(self._content.textToCopy())
+
     def localEnv(self) -> dict[str, Any]:
         return self._content.localEnv()
 
-    @path_element(views.ListView, "view")
-    def viewItem(self) -> views.ListView:
+    @path_element(views.DataListGraphic)
+    def viewItem(self) -> views.DataListGraphic:
         return self._content
 
-    @path_element(Graphic, "contents")
+    @path_element(Graphic)
     def viewContentItem(self) -> Graphic:
         # return self._content.contentsItem()
         return self._content
@@ -2478,7 +2627,7 @@ class EditorTile(Tile):
     def revertChanges(self) -> None:
         self.setText(self._saved)
 
-    @path_element(QtWidgets.QTextEdit, "editor")
+    @path_element(QtWidgets.QTextEdit)
     def editorWidget(self) -> QtWidgets.QTextEdit:
         return self._editor
 
@@ -2491,7 +2640,7 @@ class EditorTile(Tile):
     @settable()
     def setText(self, text: str) -> None:
         self._editor.setPlainText(text)
-        self.updateContents()
+        self._updateContents()
 
     def sizingToContent(self) -> bool:
         return self._size_to_content
@@ -2499,7 +2648,7 @@ class EditorTile(Tile):
     @settable(argtype=bool)
     def setSizeToContent(self, size_to_content: bool) -> None:
         self._size_to_content = size_to_content
-        self.updateContents()
+        self._updateContents()
 
     @settable("on_commit")
     def setOnCommitExpression(self, expr: Union[str, dict, config.PythonExpr]
@@ -2550,7 +2699,7 @@ class EditorTile(Tile):
                 self.updateGeometry()
             self._last_doc_height = h
 
-    def updateContents(self) -> None:
+    def _updateContents(self) -> None:
         rect = self.contentsRect()
         content = self.contentItem()
         content.setGeometry(rect)
@@ -2595,7 +2744,7 @@ class ChartTile(Tile):
     def chart(self) -> Optional[charts.ChartGraphic]:
         return self.contentItem()
 
-    @settable("chart", value_object_type=charts.ChartGraphic)
+    @settable("chart", argtype=charts.ChartGraphic)
     def setChartItem(self, chart: Graphic) -> None:
         if self._content:
             old_chart = self._content
@@ -2608,7 +2757,7 @@ class ChartTile(Tile):
             chart.setValues(self._values)
             chart.setTotal(self._total)
         self.setContentItem(chart)
-        self.updateContents()
+        self._updateContents()
 
     def model(self) -> QtCore.QAbstractItemModel:
         return self._model
@@ -2677,7 +2826,7 @@ class ChartTile(Tile):
         if chart:
             chart.setTotal(total)
 
-    def updateContents(self):
+    def _updateContents(self):
         content = self.contentItem()
         if not content:
             return
@@ -2792,16 +2941,10 @@ class ExpandingTile(Tile):
         super().__init__(parent=parent)
         self._open_rot = 0
         self._closed_rot = -90
+        self._tile_label_toggles = True
 
+        self._setupButton()
         super().setContentItem(self._makeExpandingItem())
-
-        self._button = controls.ButtonGraphic()
-        self._button.setTransparent(True)
-        self._button.setGlyph(glyphs.FontAwesome.chevron_down)
-        self._button.setFontSize(converters.LABEL_SIZE)
-        self._button.setFixedSize(QtCore.QSizeF(24, 24))
-        self._button.clicked.connect(lambda: self.toggle(animated=True))
-        self.setLabelButton(self._button, at_start=True)
 
         self.label().installEventFilter(self)
         self.setHasHeightForWidth(True)
@@ -2810,27 +2953,52 @@ class ExpandingTile(Tile):
         self._content.installEventFilter(self)
         self._updateState()
 
+    def _makeExpandingItem(self) -> Graphic:
+        raise NotImplementedError
+
+    def _setupButton(self) -> None:
+        self._button = controls.ButtonGraphic()
+        self._button.setTransparent(True)
+        self._button.setGlyph(glyphs.FontAwesome.chevron_down)
+        self._button.setFontSize(converters.LABEL_SIZE)
+        self._button.setFixedSize(QtCore.QSizeF(24, 24))
+        self._button.clicked.connect(lambda: self.toggle(animated=True))
+        self.setLabelButton(self._button, at_start=True)
+
     def eventFilter(self, watched: QtWidgets.QGraphicsWidget,
                     event: QtCore.QEvent) -> bool:
-        if watched == self._label and event.type() == event.GraphicsSceneMousePress:
+        if watched == self._label and \
+                event.type() == event.GraphicsSceneMousePress and \
+                self._tile_label_toggles:
             self._button.click()
         elif watched == self._content and event.type() == event.LayoutRequest:
             self.updateGeometry()
         return super().eventFilter(watched, event)
 
-    def _makeExpandingItem(self) -> Graphic:
-        raise NotImplementedError
+    @path_element(Graphic)
+    def contentItem(self) -> Graphic:
+        return self._content.contentItem()
+
+    @settable(argtype=Graphic)
+    def setContentItem(self, item: Graphic) -> None:
+        self._content.setContentItem(item)
+        self.updateGeometry()
+
+    @path_element(controls.ToolButtonGraphic)
+    def button(self) -> controls.ToolButtonGraphic:
+        return self._button
+
+    def localEnv(self) -> dict[str, Any]:
+        return self.contentItem().localEnv()
+
+    def textToCopy(self) -> str:
+        return self.contentItem().textToCopy()
 
     def updateableChildren(self) -> Iterable[Graphic]:
         if self._content:
             yield self._content
 
-    @settable(value_object_type=Graphic)
-    def setContentItem(self, item: Graphic) -> None:
-        self._content.setContentItem(item)
-        self.updateGeometry()
-
-    def toggle(self, animated=False) -> None:
+    def toggle(self, *, animated=False) -> None:
         self._content.toggle(animated=animated)
         self.updateGeometry()
 
@@ -2861,7 +3029,7 @@ class DetailsTile(ExpandingTile):
         self.setInnerMargins(QtCore.QMarginsF(0, 0, 0, 0))
 
     def _makeExpandingItem(self) -> Graphic:
-        rollup = controls.RollUpGraphic(self)
+        rollup = containers.RollUpGraphic(self)
         rollup.setOpen(True, animated=False)
         rollup.openStateChanged.connect(self._updateState)
         return rollup
@@ -2885,6 +3053,170 @@ class ExpandingStackTile(ExpandingTile):
         self._content.update()
 
 
+@graphictype("truncated")
+class TruncatedTile(ExpandingTile):
+    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
+        super().__init__(parent)
+        self._visible = True
+        self._tile_label_toggles = False
+        self._colors_changed = False
+        self._shrinkable = True
+        self._fade_color = themes.ThemeColor.surface
+        self._updateColors()
+
+    _fade_color: QtGui.QColor = core.DynamicColor()
+
+    def _makeExpandingItem(self) -> containers.TruncatedGraphic:
+        trunc = containers.TruncatedGraphic(self)
+        trunc.visibleChanged.connect(self._updateVisibility)
+        return trunc
+
+    def updateableChildren(self) -> Iterable[Graphic]:
+        yield self.contentItem()
+
+    def _setupButton(self) -> None:
+        self._fade_height = 24.0
+        self._fade = QtWidgets.QGraphicsRectItem(self)
+        self._fade.setPen(Qt.NoPen)
+        self._fade.setZValue(2)
+
+        # Create the "Show N more..." button
+        self._button_align = Qt.AlignCenter
+        self._button = controls.ToolButtonGraphic(self)
+        self._button.setCornerRadius(0)
+        self._button.setPillShaped(True)
+        self._button.setFlat(True)
+        self._button.setLabelMargins(QtCore.QMarginsF(8, 1, 8, 1))
+        self._button.setHaloEnabled(False)
+        self._button.setZValue(3)
+        self._button.setTextSize(styling.TextSize.xsmall)
+        self._button.setFillColor(ThemeColor.bg)
+        self._button.setTextColor(ThemeColor.secondary)
+        self._button.setBorderColor(ThemeColor.secondary_dim)
+        self._button.setBorderWidth(1.0)
+        self._button.clicked.connect(self._onButtonClicked)
+
+    def dataProxy(self) -> Optional[Graphic]:
+        return self.contentItem()
+
+    def _onButtonClicked(self) -> None:
+        self.setTruncated(False, animated=True)
+
+    def canShrink(self) -> bool:
+        return self._shrinkable
+
+    def shrinkHeightTo(self, height: float) -> None:
+        base_size = self._baseSize()
+        self._content.shrinkHeightTo(height - base_size.height())
+        self._updateState(animated=False)
+
+    def unshrink(self) -> None:
+        self.setTruncated(False)
+
+    def isTruncated(self) -> bool:
+        content: containers.TruncatedGraphic = self._content
+        return content.isTruncated() and content.truncatedItemCount()
+
+    @settable(argtype=bool)
+    def setShrinkable(self, shrinkable: bool) -> None:
+        self._shrinkable = shrinkable
+
+    @settable("more_glyph")
+    def setMoreGlyph(self, glyph: glyphs.Glyph) -> None:
+        self._button.setGlyph(glyph)
+
+    def shrunkenMinimumHeight(self) -> float:
+        base_height = self._baseSize().height()
+        smh = self._content.shrunkenMinimumHeight()
+        return max(base_height + smh, self.minimumHeight())
+
+    @settable("shrink_min")
+    def setShrunkenMinimumHeight(self, height: float) -> None:
+        self._content.setShrunkenMinimumHeight(height)
+        self.updateGeometry()
+
+    @settable("button_color")
+    def setButtonColor(self, color: converters.ColorSpec) -> None:
+        self._fade_color = color
+        self._colors_changed = True
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() == event.PaletteChange:
+            self._colors_changed = True
+
+    def setTruncated(self, truncated: bool, *, animated=False) -> None:
+        animated = animated and not self.animationDisabled()
+        self._content.setTruncated(truncated, animated=animated)
+        self._updateState(animated=animated)
+
+    def truncatedItemCount(self) -> int:
+        return self._content.truncatedItemCount()
+
+    def _updateState(self, animated=True) -> None:
+        trunc = self.isTruncated()
+        button_opacity = 1.0 if trunc else 0.0
+        if animated:
+            self._button.fadeTo(button_opacity)
+        else:
+            self._button.setOpacity(button_opacity)
+
+    def _updateColors(self) -> None:
+        self._colors_changed = False
+        gradient = QtGui.QLinearGradient(0.0, 0.0, 0.0, 1.0)
+        gradient.setCoordinateMode(gradient.ObjectMode)
+        gradient.setColorAt(0.0, Qt.transparent)
+        gradient.setColorAt(0.5, self._fade_color)
+        gradient.setColorAt(1.0, self._fade_color)
+        brush = QtGui.QBrush(gradient)
+        self._fade.setBrush(brush)
+
+    def _updateContents(self) -> None:
+        rect = self.rect()
+        self._positionCopyButton()
+        if self._content:
+            self._content.setGeometry(self.contentsRect())
+
+        frect = QtCore.QRectF(
+            rect.x(), rect.bottom() - self._fade_height,
+            rect.width(), self._fade_height
+        )
+        self._fade.setRect(frect)
+
+        button = self._button
+        bsize = button.implicitSize()
+        button.setGeometry(util.alignedRectF(
+            self.layoutDirection(), self._button_align, bsize, frect
+        ))
+
+        # The user may resize so the truncated count changes, or the view isn't
+        # even truncated anymore, so we need to update that stuff here
+        trunc = self.isTruncated()
+        if trunc:
+            trunc_count = self.truncatedItemCount()
+            self._button.setText(f"Show {trunc_count} More")
+        self._button.setOpacity(1.0 if trunc else 0.0)
+        self._fade.setVisible(trunc)
+
+    @settable()
+    def setVisible(self, visible: bool) -> None:
+        self._visible = visible
+        self._updateVisibility()
+
+    def _updateVisibility(self) -> None:
+        visible = self._visible and self._content.shouldBeVisible()
+        cur_vis = self.isVisible()
+        if visible != cur_vis:
+            super().setVisible(visible)
+
+    def paint(self, painter: QtGui.QPainter,
+              option: QtWidgets.QStyleOptionGraphicsItem,
+              widget: Optional[QtWidgets.QWidget] = None) -> None:
+        if self._colors_changed:
+            self._updateColors()
+        super().paint(painter, option, widget)
+
+
 @graphictype("side_chart")
 class ChartSwitchTile(Tile):
     def __init__(self, parent: QtWidgets.QGraphicsWidget = None):
@@ -2901,12 +3233,12 @@ class ChartSwitchTile(Tile):
     def chartItem(self) -> charts.ChartGraphic:
         return self._chart
 
-    @settable("chart", value_object_type=charts.ChartGraphic)
+    @settable("chart", argtype=charts.ChartGraphic)
     def setChartItem(self, chart: charts.ChartGraphic):
         self.prepareGeometryChange()
         self._chart = chart
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     def chartSize(self) -> float:
         return self._chartsize
@@ -2915,7 +3247,7 @@ class ChartSwitchTile(Tile):
         self.prepareGeometryChange()
         self._chartsize = extent
         self.updateGeometry()
-        self.updateContents()
+        self._updateContents()
 
     def breakWidth(self) -> float:
         if self._breakwidth > 0:
@@ -2985,7 +3317,7 @@ class ChartSwitchTile(Tile):
     # def setChartTotal(self, total: float):
     #     self.chart().setTotal(total)
 
-    def updateContents(self):
+    def _updateContents(self):
         rect = self.contentsRect()
         chart = self.chartItem()
         content = self.contentItem()
@@ -3327,7 +3659,7 @@ class LogoTile(ImageTile):
 
         if size.width() < rect.width() or size.height() < rect.height():
             rect = util.alignedRectF(self.layoutDirection(), self._alignment,
-                                            size, rect)
+                                     size, rect)
         painter.drawPixmap(rect.topLeft(), pixmap)
 
 
@@ -3373,18 +3705,18 @@ class LogoTextTile(ImageTile):
     @settable(argtype=Qt.Alignment)
     def setImageAlignment(self, align: Qt.Alignment) -> None:
         self._imagealign = align
-        self.updateContents()
+        self._updateContents()
 
     @settable()
     def setGap(self, gap: float):
         self._gap = gap
-        self.updateContents()
+        self._updateContents()
 
     @settable()
     def setValue(self, text: str) -> None:
         self.setText(text)
 
-    def updateContents(self):
+    def _updateContents(self):
         rect = self.contentsRect()
         w = self._logo_widget
         gap = self._gap
@@ -3407,7 +3739,7 @@ class LogoTextTile(ImageTile):
         if path and path.exists():
             pixmap = loadImage(path, self._logo_widget.size())
             self._logo_widget.setPixmap(pixmap)
-        self.updateContents()
+        self._updateContents()
 
 
 @graphictype("houdini_icon")
@@ -3423,7 +3755,7 @@ class HoudiniIconTile(LogoTile):
         else:
             pixmap = icon.pixmap(256, 256)
         self.setPixmap(pixmap)
-        self.updateContents()
+        self._updateContents()
 
 
 @graphictype("blank")
@@ -3453,6 +3785,10 @@ class SurfaceTile(LinearLayoutTile):
         self._title_min_y = 0.0
         self._title_shown = False
         self._footer_item: Optional[Graphic] = None
+        self._cutoff_name = ""
+        self._cutoff_item: Optional[weakref.ref[QtWidgets.QGraphicsItem]] = None
+
+        self.setSelectable(False)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -3466,15 +3802,14 @@ class SurfaceTile(LinearLayoutTile):
                    value: Any) -> Any:
         if change == self.ItemScenePositionHasChanged:
             self._updateTitleAndFooterVisibility()
-        elif change == self.ItemSceneChange:
-            old = self.scene()
-            if old and isinstance(old, core.GraphicScene):
-                old.viewportChanged.disconnect(
-                    self._updateTitleAndFooterVisibility)
-            if isinstance(value, core.GraphicScene):
-                value.viewportChanged.connect(
-                    self._updateTitleAndFooterVisibility)
         return super().itemChange(change, value)
+
+    def sceneChanged(self, old_scene: QtWidgets.QGraphicsScene,
+                     new_scene: QtWidgets.QGraphicsScene) -> None:
+        if old_scene and isinstance(old_scene, core.GraphicScene):
+            old_scene.viewportChanged.disconnect(self.viewportChanged)
+        if isinstance(new_scene, core.GraphicScene):
+            new_scene.viewportChanged.connect(self.viewportChanged)
 
     def updateableChildren(self) -> Iterable[Graphic]:
         yield from super().updateableChildren()
@@ -3483,18 +3818,18 @@ class SurfaceTile(LinearLayoutTile):
         if self._footer_item:
             yield self._footer_item
 
-    @settable("title_item", value_object_type=Graphic)
+    @settable("title_item", argtype=Graphic)
     def setTitleItem(self, item: Graphic) -> None:
         self._title_item = item
         item.setParentItem(self)
-        item.setZValue(10)
+        item.setZValue(3)
         self._updateTitleAndFooterVisibility(animated=False)
 
     def titleTargetItem(self) -> Optional[QtWidgets.QGraphicsWidget]:
         name = self._title_target_name
         item = self._title_target_item
         if name and not item:
-            item = self.findChildGraphic(name, recursive=True)
+            item = self.findElement(name, recursive=True)
             self._title_target_item = item
         return item
 
@@ -3508,7 +3843,27 @@ class SurfaceTile(LinearLayoutTile):
         self._title_min_y = min_y
         self._updateTitleAndFooterVisibility(animated=False)
 
+    @settable("cutoff_item")
+    def setCutoffItemName(self, object_name: str) -> None:
+        self._cutoff_name = object_name
+
+    def _cutoffItem(self) -> Optional[QtWidgets.QGraphicsItem]:
+        if self._cutoff_item:
+            return self._cutoff_item()
+
+        cutoff = self.findElement(self._cutoff_name, recursive=True)
+        if cutoff:
+            self._cutoff_item = weakref.ref(cutoff)
+        return cutoff
+
+    def cutoffHeight(self) -> float:
+        if cutoff := self._cutoffItem():
+            return cutoff.pos().y()
+        else:
+            return self.size().height()
+
     def viewportChanged(self) -> None:
+        super().viewportChanged()
         self._updateTitleAndFooterVisibility()
 
     def shouldShowTitle(self) -> bool:
@@ -3527,11 +3882,11 @@ class SurfaceTile(LinearLayoutTile):
     def footerItem(self) -> Optional[Graphic]:
         return self._footer_item
 
-    @settable("footer_item", value_object_type=Graphic)
+    @settable("footer_item", argtype=Graphic)
     def setFooterItem(self, item: Graphic) -> None:
         self._footer_item = item
         item.setParentItem(self)
-        item.setZValue(9)
+        item.setZValue(3)
         self._updateContents()
 
     def shouldShowFooter(self) -> bool:

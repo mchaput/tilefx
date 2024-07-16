@@ -2,6 +2,7 @@ from __future__ import annotations
 import ast
 import re
 import time
+import weakref
 from collections import defaultdict
 from types import CodeType
 from typing import (TYPE_CHECKING, cast, Any, Callable, Collection, Iterable,
@@ -28,26 +29,16 @@ ParentSetterType = Callable[[QtCore.QObject, QtCore.QObject, Any], None]
 QObjType = type[QtCore.QObject]
 DependsMap = dict[str, Collection[str]]
 T = TypeVar("T")
+Q = TypeVar("Q", bound=type[QtCore.QObject])
 
 
-settables_lookup: dict[int, SetterInfo] = {}
-setter_cache: dict[tuple[QObjType, str], SetterType] = {}
-propety_alias_cache: dict[int, dict[str, str]] = {}
-
-
-class SetterInfo(NamedTuple):
-    name: Optional[str]
-    converter: Optional[Callable[..., Any]]
-    pass_styled: bool
-    value_object_type: Optional[type[QtCore.QObject]]
-    is_parent_method: bool
-
-
-def registrar(registry_dict: dict):
+def registrar(registry_dict: dict, compile_setters=False):
     def class_wrapper(*names):
         def fn(cls):
             for name in names:
                 registry_dict[name] = cls
+            if compile_setters:
+                compileSettables(cls)
             return cls
 
         return fn
@@ -66,26 +57,36 @@ def snakeToCamel(snake: str, initial=False) -> str:
                    in enumerate(snake.split("_")))
 
 
+class SetterInfo(NamedTuple):
+    name: Optional[str]
+    converter: Callable
+    value_object_type: Optional[type[QtCore.QObject]]
+    is_parent_method: bool
+
+
+setter_lookup: dict[tuple[QObjType, str], SetterType] = {}
+# Setter metadata, keyed by the id() of the method
+setter_infos: dict[int, SetterInfo] = {}
+
+
 def settable(name: str = None, *, argtype: type = None,
              converter: Callable = None, convert_each=False,
-             pass_styled=False, value_object_type: type[QtCore.QObject] = None,
              is_parent_method=False) -> Callable[[T], T]:
     if name is not None and not isinstance(name, str):
         raise TypeError(f"{name!r} is not a string")
     if argtype is not None and not converter:
-        from .converters import converter_registry, takes_styled_object
-        try:
-            converter = converter_registry[argtype]
-        except KeyError:
-            raise TypeError(f"No converter for argument type {argtype!r}")
-
-        pass_styled = pass_styled or converter in takes_styled_object
+        from .converters import converter_registry
+        converter = converter_registry.get(argtype)
 
         if convert_each:
             conv = converter
 
             def converter(seq: Sequence[Any]) -> Sequence[Any]:
                 return [conv(item) for item in seq]
+
+    value_object_type = (
+        argtype if argtype and issubclass(argtype, QtCore.QObject) else None
+    )
 
     def decorator(m: T) -> T:
         method_name = m.__name__
@@ -94,99 +95,40 @@ def settable(name: str = None, *, argtype: type = None,
                 f"Parent setter method {method_name} name must start "
                 "with 'setChild'"
             )
-        # elif not method_name.startswith("set"):
-        #     raise NameError(
-        #         f"Setter method {method_name} name must start with 'set'"
-        #     )
 
         key = name or camelToSnake(method_name, drop_set=True)
-        settables_lookup[id(m)] = SetterInfo(
-            key, converter, pass_styled, value_object_type, is_parent_method,
-        )
+        # Some "methods" are objects we can't put custom attributes on (ie
+        # descriptors), so we have to store the metadata in an indirect lookup
+        info = SetterInfo(key, converter, value_object_type, is_parent_method)
+        setter_infos[id(m)] = info
         return m
 
     return decorator
 
 
-def _findSettable(obj: QtCore.QObject, key: str, attr_prefix: str,
-                  is_parent_method: bool) -> Callable:
-    obj_type = type(obj)
-    cache_key = (obj_type, key)
-    setter: Optional[SetterType] = setter_cache.get(cache_key)
-    if not setter:
-        for attr_name in dir(obj_type):
-            if not attr_name.startswith("set"):
-                continue
-            method = getattr(obj_type, attr_name)
-            if info := settables_lookup.get(id(method)):
-                if key == info.name and info.is_parent_method == is_parent_method:
-                    setter = makeSettableCaller(method, info)
-                    setter_cache[cache_key] = setter
-                    break
-    return setter
+def settersAndInfos(cls: type[QtCore.QObject]
+                    ) -> Iterable[tuple[SetterType, SetterInfo]]:
+    for name in dir(cls):
+        m = getattr(cls, name)
+        if info := setter_infos.get(id(m)):
+            yield m, info
 
 
-def findSettable(obj: QtCore.QObject, key: str) -> Optional[SetterType]:
-    return _findSettable(obj, key, "set", is_parent_method=False)
-
-
-def findParentSettable(obj: QtCore.QObject, key: str
-                       ) -> Optional[ParentSetterType]:
-    return _findSettable(obj, key, "setChild", is_parent_method=True)
-
-
-def setterInfos(obj_type: type[QtCore.QObject]) -> dict[str, SetterInfo]:
-    name_info_map: dict[str, SetterInfo] = {}
-    for attr_name in dir(obj_type):
-        if not attr_name.startswith("set"):
-            continue
-        method = getattr(obj_type, attr_name)
-        if info := settables_lookup.get(id(method)):
-            name_info_map[info.name] = info
-    return name_info_map
-
-
-def settableNames(obj: QtCore.QObject) -> Sequence[str]:
-    return list(setterInfos(type(obj)))
-
-
-def makeSettableCaller(fn: Callable[[QtCore.QObject, Any], None],
-                       info: SetterInfo = None) -> SetterType:
-    if info and info.converter:
-        if info.pass_styled:
-            def styled_conv_setter(obj: QtCore.QObject, value: Any) -> None:
-                fn(obj, info.converter(value, styled_object=obj))
-            setter = styled_conv_setter
-        else:
-            def conv_setter(obj: QtCore.QObject, value: Any) -> None:
-                fn(obj, info.converter(value))
-            setter = conv_setter
-    else:
-        setter = fn
-    return setter
-
-
-def findQtProperty(obj: QtCore.QObject, key: str
-                   ) -> Optional[Callable[[Any, Any], None]]:
-    try:
-        meta = obj.metaObject()
-    except AttributeError:
-        return None
-
-    setter: Optional[Callable[[Any], None]] = None
-    camel_name = snakeToCamel(key, initial=False)
-    for i in range(meta.propertyCount()):
-        metaprop = meta.property(i)
-        propname = metaprop.name()
-        if propname == camel_name and metaprop.isWritable():
-            def setter(o: QtCore.QObject, value: Any) -> None:
-                o.setProperty(propname, value)
-            break
-
-    return setter
+def findParentSettable(obj: QtCore.QObject, key: str) -> Optional[SetterType]:
+    method = setter_lookup[type(obj), key]
+    if info := setter_infos.get(id(method)):
+        if info.is_parent_method:
+            return method
 
 
 def _findElement(obj: QtCore.QObject, part: str) -> Optional[QtCore.QObject]:
+    # For Graphic items, we have a pathElement() method that lets the item
+    # "export" names without them being actual child items
+    from .graphics import core
+    if isinstance(obj, core.Graphic):
+        if element := obj.findElement(part):
+            return element
+
     # For a regular QObject (but not a QGraphicsItem), use findChild() to find
     # a child by name
     found = obj.findChild(QtCore.QObject, part)
@@ -201,54 +143,90 @@ def _findElement(obj: QtCore.QObject, part: str) -> Optional[QtCore.QObject]:
                     child.objectName() == part:
                 return child
 
-    # For Graphic items, we have a pathElement() method that lets the item
-    # "export" names without them being actual child items
-    from .graphics import core
-    if isinstance(obj, core.Graphic):
-        element = obj.pathElement(part)
-        if element:
-            return element
-
     # camel_part = snakeToCamel(part)
     # if hasattr(obj, camel_part):
     #     return getattr(obj, camel_part)()
 
 
-def setSettable(obj: QtCore.QObject, key: str, value: Any) -> None:
-    from .graphics import core
-
-    orig_key = key
-    if isinstance(obj, core.Graphic):
-        cls = type(obj)
-        cls_id = id(cls)
-        if cls_id in propety_alias_cache:
-            aliases = propety_alias_cache[cls_id]
-        else:
-            aliases = propety_alias_cache[cls_id] = cls.propertyAliases()
-        key = aliases.get(key, key)
-
-    if "." in key:
-        parts = key.split(".")
-        key = parts[-1]
-        for part in parts[:-1]:
-            next_obj = _findElement(obj, part)
-            if not next_obj:
-                raise KeyError(
-                    f"Could not find {part!r} of {obj!r} ({orig_key}")
-            obj = next_obj
-
-    if set_method := findSettable(obj, key):
-        pass
-    elif set_method := findQtProperty(obj, key):
-        pass
+def getSettable(obj_type: type[QtCore.QObject], name: str) -> SetterType:
+    key = obj_type, name
+    if key in setter_lookup:
+        setter = setter_lookup[key]
+    elif "." in name:
+        # The template can set arbitrary dotted paths that may not be cached yet
+        setter = _makePathSetter(name)
+        setter_lookup[key] = setter
     else:
-        known = settableNames(obj)
-        raise KeyError(f"Property {key!r} not found on {obj!r} ({orig_key}): "
-                       f"{known}")
-    try:
-        set_method(obj, value)
-    except TypeError as e:
-        raise TypeError(f"Error setting {key} to {value} on {obj}: {e}")
+        raise KeyError(f"No property {name} on {obj_type}")
+    return setter
+
+
+def setSettable(obj: QtCore.QObject, name: str, value: Any) -> None:
+    getSettable(type(obj), name)(obj, value)
+
+
+def _makePathSetter(path: str) -> SetterType:
+    parts = path.split(".")
+    elements = parts[:-1]
+    key = parts[-1]
+
+    def setter(obj: core.Graphic, value: Any) -> None:
+        for name in elements:
+            obj = obj.findElement(name)
+        m = setter_lookup[type(obj), key]
+        m(obj, value)
+
+    return setter
+
+
+def _makeSetter(fn: SetterType, info: SetterInfo) -> SetterType:
+    if info.converter:
+        def conv_setter(obj: QtCore.QObject, value: Any) -> None:
+            fn(obj, info.converter(value))
+        setter = conv_setter
+    else:
+        setter = fn
+    return setter
+
+
+def _makeQtPropertySetter(prop_name: str) -> SetterType:
+    # name_bytes = prop_name.encode("ascii")
+
+    def _qtPropSetter(obj: QtCore.QObject, value: Any) -> None:
+        obj.setProperty(prop_name, value)
+
+    return _qtPropSetter
+
+
+def compileSettables(cls: Q) -> Q:
+    from .graphics.core import Graphic
+
+    # Make setters for Qt properties
+    if issubclass(cls, QtCore.QObject):
+        meta = cls.staticMetaObject
+        for i in range(meta.propertyCount()):
+            prop = meta.property(i)
+            if prop.isWritable():
+                prop_name = prop.name()
+                snake_name = camelToSnake(prop_name)
+                setter_lookup[cls, snake_name] = \
+                    _makeQtPropertySetter(prop_name)
+
+    for attr_name in dir(cls):
+        m = getattr(cls, attr_name)
+        if info := setter_infos.get(id(m)):
+            setter_lookup[cls, info.name] = _makeSetter(m, info)
+
+    if issubclass(cls, Graphic):
+        aliases = cls.propertyAliases()
+        for alias, path in aliases.items():
+            if "." in path:
+                setter = _makePathSetter(path)
+            else:
+                setter = setter_lookup[cls, path]
+            setter_lookup[cls, alias] = setter
+
+    return cls
 
 
 # Controller
@@ -586,12 +564,37 @@ def pythonExpressionMap(m: dict[str, Union[str, dict]]
 
 
 class Updater:
-    def __init__(self, var_map: dict[str, Expr] = None,
-                 prop_map: dict[str, Expr] = None):
-        self.var_map = var_map or {}
-        self.var_depends: DependsMap = {}
-        self.prop_map = prop_map or {}
-        self.prop_depends: DependsMap = {}
+    def __init__(self, controller: DataController, var_data: dict,
+                 prop_data: dict, obj: QtCore.QObject = None,
+                 as_template=False):
+        var_map = exprMap(var_data, controller) if var_data else {}
+        if as_template:
+            prop_map = pythonExpressionMap(prop_data)
+        else:
+            prop_map = exprMap(prop_data, controller=controller)
+
+        # self.visibility_expr = None
+        self.visibility_expr: Optional[Expr] = prop_map.pop("visible", None)
+
+        self._object: Optional[weakref.ref[QtCore.QObject]] = \
+            weakref.ref(obj) if obj else None
+        self.controller = weakref.ref(controller)
+        self.var_map: dict[str, Expr] = var_map or {}
+        self.prop_map: dict[str, Expr] = prop_map or {}
+        self.as_template = as_template
+
+        self.setters: Optional[list[tuple[Expr, SetterType]]] = None
+        if obj:
+            self._cacheSetters(type(obj))
+
+        self.var_depends = self._dependsMap(self.var_map)
+        self.prop_depends = self._dependsMap(self.prop_map)
+
+    def _cacheSetters(self, obj_type: type[QtCore.QObject]) -> None:
+        setters = self.setters = []
+        for prop_name, expr in self.prop_map.items():
+            setter = getSettable(obj_type, prop_name)
+            setters.append((expr, setter))
 
     @staticmethod
     def _dependsMap(m: dict[str, Expr]) -> DependsMap:
@@ -603,71 +606,66 @@ class Updater:
                 deps[dep_name].add(name)
         return deps
 
-    def updateDependencies(self, obj: QtCore.QObject, data: dict[str, Any],
-                           env: dict[str, Any], name: str) -> dict[str, Any]:
-        env = env.copy()
-        for var_name in self.var_depends.get(name, ()):
-            expr = self.var_map[var_name]
-            env[var_name] = expr.evaluate(data, env)
+    def dependsOn(self, name: str) -> bool:
+        return name in self.var_depends or name in self.prop_depends
 
-        for prop_name in self.prop_depends.get(name, ()):
-            expr = self.prop_map[prop_name]
-            value = expr.evaluate(data, env)
-            setSettable(obj, prop_name, value)
-        return env
+    def updateDependencies(self, data: dict[str, Any], env: dict[str, Any],
+                           name: str, obj: QtCore.QObject = None) -> None:
+        if not obj:
+            if self._object:
+                obj = self._object()
+            else:
+                raise Exception("No object to update dependencies")
 
-    def setVariableData(self, var_dict: dict[str, Any],
-                        controller: DataController) -> None:
-        self.var_map = exprMap(var_dict, controller)
-        self.var_depends = self._dependsMap(self.var_map)
+        var_depends = self.var_depends.get(name, ())
+        if var_depends:
+            env = env.copy()
+            for var_name in var_depends:
+                env[var_name] = self.var_map[var_name].evaluate(data, env)
 
-    def setPropertyData(self, prop_dict: dict[str, Any],
-                        controller: DataController, as_template=False) -> None:
-        if as_template:
-            pm = pythonExpressionMap(prop_dict)
-        else:
-            pm = exprMap(prop_dict, controller=controller)
-        self.prop_map = pm
-        self.prop_depends = self._dependsMap(self.prop_map)
+        for expr, setter in self.setters:
+            if name in expr.depends:
+                setter(obj, expr.evaluate(data, env))
 
-    def addComputedProperty(self, name: str, value: Expr) -> None:
-        self.prop_map[name] = value
-
-    def updateObject(self, obj: QtCore.QObject, data: Optional[dict[str, Any]],
-                     env: dict[str, Any], extra_env: dict[str, Any] = None
-                     ) -> dict[str, JsonValue]:
+    def updateObject(self, data: Optional[dict[str, Any]],
+                     env: dict[str, Any], extra_env: dict[str, Any] = None,
+                     obj: QtCore.QObject = None) -> dict[str, JsonValue]:
         from .graphics import core
 
-        var_map = self.var_map
-        prop_map = self.prop_map
+        if not obj:
+            if self._object:
+                obj = self._object()
+            else:
+                raise Exception("No object to update")
 
-        if var_map or extra_env:
+        if self.var_map or extra_env or isinstance(obj, core.Graphic):
             env = env.copy()
-
             if extra_env:
                 env.update(extra_env)
 
-            for varname, compvalue in var_map.items():
+            for varname, compvalue in self.var_map.items():
                 env[varname] = compvalue.evaluate(data, env)
 
             if isinstance(obj, core.Graphic):
                 env.update(obj.localEnv())
 
-        if prop_map:
-            for propname, compvalue in prop_map.items():
-                value = compvalue.evaluate(data, env)
-                setSettable(obj, propname, value)
+        if isinstance(obj, core.Graphic) and self.visibility_expr:
+            visible = self.visibility_expr.evaluate(data, env)
+            obj.setVisible(visible)
+            if not visible:
+                return {}
+
+        if self.setters is None:
+            self._cacheSetters(type(obj))
+        for expr, setter in self.setters:
+            setter(obj, expr.evaluate(data, env))
+
+        # if prop_map:
+        #     for propname, compvalue in prop_map.items():
+        #         value = compvalue.evaluate(data, env)
+        #         setSettable(obj, propname, value)
 
         return env
-
-    def hasValues(self) -> bool:
-        return self.hasVariables() or self.hasProperties()
-
-    def hasVariables(self) -> bool:
-        return bool(self.var_map)
-
-    def hasProperties(self) -> bool:
-        return bool(self.prop_map)
 
 
 class Models(dict):
@@ -690,7 +688,8 @@ class AbstractController(QtCore.QObject):
     def clearEnv(self) -> None:
         self._global_env.clear()
 
-    def prepObject(self, obj: QtCore.QObject, data: dict[str, Any]) -> None:
+    def prepObject(self, obj: QtCore.QObject, data: dict[str, Any],
+                   name: str = None) -> None:
         raise NotImplementedError
 
     def globalEnv(self) -> dict[str, Any]:
@@ -710,7 +709,9 @@ class DataController(AbstractController):
     def __init__(self):
         super().__init__()
         self.persistent_models = Models()
+        self.shared_item_pools: dict[str, views.DataItemPool] = {}
         self.models = Models()
+        self._obj_id_to_pool_name: dict[int, str] = {}
         self._updaters: dict[int, Updater] = {}
         self._template_updaters: dict[tuple[int, str], Updater] = {}
         self._externals: dict[str, ExternalExpr] = {}
@@ -774,15 +775,16 @@ class DataController(AbstractController):
 
     def _setupTemplate(self, obj_id: int, key: str,
                        template_data: dict[str, Any]) -> None:
-        updater = Updater()
-        updater.setVariableData(template_data.pop("variables", {}), self)
-        updater.setPropertyData(template_data.pop("properties", {}), self,
-                                as_template=True)
-        if updater.hasValues():
+        var_data = template_data.pop("variables", None)
+        prop_data = template_data.pop("properties", None)
+        if prop_data:
+            updater = Updater(self, var_data, prop_data, as_template=True)
             self._template_updaters[obj_id, key] = updater
 
-    def prepObject(self, obj: QtCore.QObject, data: dict[str, Any]) -> None:
+    def prepObject(self, obj: QtCore.QObject, data: dict[str, Any],
+                   name: str = None) -> None:
         from .graphics.core import Graphic
+        from .graphics.views import DataItemPool
 
         # models: dict mapping model names to data models, for shared models
         model_dict = data.pop("models", {})
@@ -802,19 +804,31 @@ class DataController(AbstractController):
 
         # model: a key containing either a string (the name of a shared model),
         # or a data model for local use
-        obj_model: Optional[QtCore.QAbstractItemModel] = None
         if "model" in data:
             self._setObjectModelData(data_obj, data.pop("model"))
 
-        updater = Updater()
-        updater.setVariableData(data.pop("variables", {}), self)
-        updater.setPropertyData(data.pop("properties", {}), self)
-        if self.value_key and self.value_key in data:
-            jp = data.pop(self.value_key)
-            updater.addComputedProperty("value",
-                                        self.makeExpr(self.value_key, jp))
+        shared_pool_data = data.pop("shared_item_templates", None)
+        if shared_pool_data:
+            if isinstance(shared_pool_data, dict):
+                for tmpl_name, template_data in shared_pool_data.items():
+                    if tmpl_name in self.shared_item_pools:
+                        raise Exception(
+                            f"Duplicate shared template name: {tmpl_name}"
+                        )
+                    pool = DataItemPool(tmpl_name)
+                    pool.setItemTemplate(template_data)
+                    self.shared_item_pools[tmpl_name] = pool
+                    self._setupTemplate(-1, tmpl_name, template_data)
+            else:
+                raise ValueError("shared_item_templates must be a dict")
 
-        if updater.hasValues():
+        var_data = data.pop("variables", None)
+        prop_data = data.pop("properties", None)
+        if self.value_key and self.value_key in data:
+            prop_data["value"] = self.makeExpr(self.value_key,
+                                               data.pop(self.value_key))
+        if prop_data:
+            updater = Updater(self, var_data, prop_data, obj=obj)
             self._updaters[orig_obj_id] = updater
 
         # Look for templates
@@ -824,8 +838,19 @@ class DataController(AbstractController):
             for key in template_keys:
                 if key in data:
                     template_data = data.pop(key)
-                    setSettable(data_obj, key, template_data)
-                    self._setupTemplate(data_obj_id, key, template_data)
+                    if isinstance(template_data, str):
+                        tmpl_name = template_data
+                        if tmpl_name in self.shared_item_pools:
+                            pool = self.shared_item_pools[tmpl_name]
+                            data_obj.setItemPool(pool)
+                            self._obj_id_to_pool_name[data_obj_id] = tmpl_name
+                        else:
+                            raise KeyError(
+                                f"Unkown shared template: {tmpl_name}"
+                            )
+                    else:
+                        setSettable(data_obj, key, template_data)
+                        self._setupTemplate(data_obj_id, key, template_data)
 
         # listen_to = data.pop("listen", None)
         # if isinstance(listen_to, str):
@@ -837,72 +862,13 @@ class DataController(AbstractController):
     def updateDependencies(self, name: str, data: dict[str, Any],
                            env: dict[str, JsonValue] = None) -> None:
         env = env if env is not None else self.globalEnv()
-        root = self._root
-        if not root:
-            raise Exception("No root item set")
-        self.updateObjectDependencies(root, data, env, name)
+        for updater in self._updaters.values():
+            if updater.dependsOn(name):
+                updater.updateDependencies(data, env, name)
 
-    def updateObjectDependencies(self, obj: QtCore.QObject,
-                                 data: Optional[dict[str, Any]],
-                                 env: Optional[dict[str, JsonValue]],
-                                 name: str) -> None:
-        from .graphics import core, views
-
-        env = env if env is not None else self.globalEnv()
-        updater = self._updaters.get(id(obj))
-        if updater and name in updater.prop_depends:
-            extra_env = {}
-            if isinstance(obj, core.Graphic):
-                data_obj = self._dataProxyFor(obj)
-                extra_env["model"] = data_obj.model()
-            env = updater.updateDependencies(obj, data, env, name)
-
-        if isinstance(obj, core.Graphic):
-            data_obj = self._dataProxyFor(obj)
-            if isinstance(data_obj, views.DataLayoutGraphic):
-                for key in data_obj.templateKeys():
-                    upd_key = (id(data_obj), key)
-                    item_updater = self._template_updaters.get(upd_key)
-                    if item_updater and name in item_updater.prop_depends:
-                        self._updateItemDependencies(data_obj, item_updater,
-                                                     env, name)
-
-            for child in obj.updateableChildren():
-                self.updateObjectDependencies(child, data, env, name)
-
-        if isinstance(obj, QtWidgets.QGraphicsItem):
-            obj.updateGeometry()
-            obj.update()
-
-    def _updateItemDependencies(self, obj: views.DataLayoutGraphic,
-                                updater: Updater, env: dict[str, Any],
-                                dep_name: str) -> None:
-        from .graphics import views
-        from .models import ModelRowAdapter
-
-        model: QtCore.QAbstractItemModel = obj.model()
-        mra = ModelRowAdapter(model, 0)
-        env = env.copy()
-        env.update({
-            "model": model,
-            "row_num": 0,
-            "item":  mra
-        })
-        for graphic in obj.liveItems():
-            row_num = graphic.data(views.ITEM_ROW_NUM)
-            env["row_num"] = row_num
-            mra.row = row_num
-            updater.updateDependencies(graphic, None, env, dep_name)
-
-    def updateFromData(self, data: dict[str, Any], env: dict[str, Any] = None,
-                       clear_models=False) -> None:
+    def updateModels(self, data: dict[str, Any], env: dict[str, Any] = None,
+                     clear_models=False) -> None:
         from . import models
-
-        root = self._root
-        if not root:
-            raise Exception("No root item set")
-
-        env = env if env is not None else self.globalEnv()
         # t = time.perf_counter()
         for model_name, model in self.models.items():
             # tt = time.perf_counter()
@@ -914,39 +880,26 @@ class DataController(AbstractController):
             if clear_models:
                 model.clear()
             model.updateFromData(data, env)
+            env[model_name] = model
             # print(f"Update model {model.objectName()}: {model.rowCount()} "
             #       f"{time.perf_counter() - tt:0.04f}")
             # if isinstance(model, models.DataModel):
             #     print("rows=", model._rows)
         # print(f"Update models: {time.perf_counter() - t:0.04f}")
 
-        # t = time.perf_counter()
-        self.updateObjectFromData(root, data, env)
-        # print(f"Update graphics: {time.perf_counter() - t:0.04f}")
+    def updateFromData(self, data: dict[str, Any], env: dict[str, Any] = None,
+                       clear_models=False) -> None:
+        root = self._root
+        if not root:
+            raise Exception("No root item set")
 
-    def updateObjectFromData(self, obj: QtCore.QObject, data: dict[str, Any],
-                             env: dict[str, JsonValue] = None) -> None:
-        from .graphics import core
-
-        # t = time.perf_counter()
         env = env if env is not None else self.globalEnv()
-        updater = self._updaters.get(id(obj))
-        if updater:
-            extra_env = {}
-            if isinstance(obj, core.Graphic):
-                data_obj = self._dataProxyFor(obj)
-                extra_env["model"] = data_obj.model()
-            env = updater.updateObject(obj, data, env, extra_env)
-        # print(f"--Update {obj.objectName()} {time.perf_counter() - t:0.04f}")
+        self.updateModels(data, env, clear_models=clear_models)
 
-        for child in obj.updateableChildren():
-            self.updateObjectFromData(child, data, env)
+        for updater in self._updaters.values():
+            updater.updateObject(data, env)
 
-        if isinstance(obj, QtWidgets.QGraphicsItem):
-            obj.updateGeometry()
-            obj.update()
-
-    def updateTemplateItemFromEnv(self, obj: QtCore.QObject, key: str,
+    def updateTemplateItemFromEnv(self, obj: QtCore.QObject, template_name: str,
                                   item: QtCore.QObject,
                                   extra_env: dict[str, Any]) -> None:
         if not obj:
@@ -954,10 +907,17 @@ class DataController(AbstractController):
         if not item:
             raise ValueError("No item")
 
-        updater = self._template_updaters.get((id(obj), key))
+        obj_id = id(obj)
+        shared_pool_name = self._obj_id_to_pool_name.get(obj_id)
+        if shared_pool_name is None:
+            tmpl_key = (obj_id, template_name)
+        else:
+            tmpl_key = (-1, shared_pool_name)
+
+        updater = self._template_updaters.get(tmpl_key)
         if updater:
-            updater.updateObject(item, data=None, env=self.globalEnv(),
-                                 extra_env=extra_env)
+            updater.updateObject(None, env=self.globalEnv(),
+                                 extra_env=extra_env, obj=item)
 
         if isinstance(item, QtWidgets.QGraphicsItem):
             item.updateGeometry()
@@ -965,7 +925,7 @@ class DataController(AbstractController):
 
     def updateItemFromModel(self, model: QtCore.QAbstractItemModel, row: int,
                             obj: QtCore.QObject, item: QtCore.QObject,
-                            key="item_template",
+                            template_name="item_template",
                             extra_env: dict[str, Any] = None) -> None:
         from .models import ModelRowAdapter
         env = {
@@ -975,7 +935,7 @@ class DataController(AbstractController):
         }
         if extra_env:
             env.update(extra_env)
-        self.updateTemplateItemFromEnv(obj, key, item, env)
+        self.updateTemplateItemFromEnv(obj, template_name, item, env)
 
 
 def updateSettables(obj: QtCore.QObject, updates: dict[str, Any]) -> None:

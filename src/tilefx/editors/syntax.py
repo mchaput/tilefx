@@ -8,8 +8,18 @@ from PySide2.QtCore import Qt
 
 
 ws_expr = re.compile(r"\s+")
-number_expr = re.compile(r"\b(-?\d+([.]\d*(e\d+)?)?)|([.]\d+([eE]\d*)?)\b")
 unichar_expr = re.compile(r"\\u[A-Fa-f-0-9]{4}")
+number_expr = re.compile(r"""
+\b  # only match after a break
+[-+]?  # Optionally start with a sign
+\d(\d|_\d)*  # Underscores are allowed but not at start or end
+(
+    [.]
+    \d(\d|_\d)*  # Fractional part
+    ([eE]\d(\d|_\d)*)?  # Scientific notation
+)?
+\b # only match before a break
+""", re.VERBOSE)
 
 
 class Style(enum.Enum):

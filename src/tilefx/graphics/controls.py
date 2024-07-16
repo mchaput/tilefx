@@ -115,6 +115,7 @@ class TransparentComboBox(QtWidgets.QComboBox):
 def makeCheckmark(parent: QtWidgets.QGraphicsItem = None,
                   color: converters.ColorSpec = ThemeColor.primary):
     checkmark = StringGraphic(parent)
+    checkmark.setTextAlignment(Qt.AlignCenter)
     checkmark.setGlyph(glyphs.FontAwesome.check)
     checkmark.setTextSize(converters.TINY_TEXT_SIZE)
     checkmark.setTextColor(color)
@@ -183,7 +184,7 @@ class SvgGraphic(Graphic):
         super().__init__(parent)
         self._renderer: Optional[QtSvg.QSvgRenderer] = None
         self._alignment = Qt.AlignCenter
-        self.setCacheMode(self.ItemCoordinateCache)
+        # self.setCacheMode(self.ItemCoordinateCache)
         self._color: Optional[QtGui.QColor] = None
 
     _color = DynamicColor()
@@ -243,32 +244,57 @@ class SvgGraphic(Graphic):
             painter.fillRect(svg_rect, color)
 
 
-@graphictype("controls.icon")
-class IconGraphic(Graphic):
+@graphictype("controls.pixmap")
+class PixmapGraphic(core.RectangleGraphic):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
-        self._icon: Optional[QtGui.QIcon] = None
+        self._image: Optional[QtGui.QIcon | QtGui.QPixmap] = None
         self._alignment: Qt.Alignment = Qt.AlignCenter
 
-    @settable()
-    def setGlyph(self, name: str) -> None:
-        self._icon = glyphs.icon(name)
+    @settable("align", argtype=Qt.Alignment)
+    def setAlignment(self, align: Qt.Alignment) -> None:
+        self._alignment = align
+        self.update()
 
     @settable()
     def setHoudiniIcon(self, name: str) -> None:
         import hou
-        self._icon = hou.qt.Icon(name)
+        self._image = hou.qt.Icon(name, 512, 512)
+        self.update()
+
+    def setIcon(self, icon: QtGui.QIcon) -> None:
+        self._image = icon
+        self.update()
 
     @settable()
-    def setIconPath(self, path: Union[str, pathlib.Path]):
-        self._icon = QtGui.QIcon(str(path))
+    def setPath(self, path: Union[str, pathlib.Path]):
+        self._image = QtGui.QPixmap(str(path))
+
+    @settable(argtype=QtCore.QSizeF)
+    def setSize(self, size: QtCore.QSizeF) -> None:
+        self._implicit_size = size
+
+    def implicitSize(self) -> QtCore.QSizeF:
+        if self._implicit_size:
+            size = self._implicit_size
+        elif isinstance(self._image, QtGui.QIcon):
+            size = QtCore.QSizeF(16, 16)
+        elif isinstance(self._image, QtGui.QPixmap):
+            size = self._image.size()
+        else:
+            size = QtCore.QSizeF()
+        return size
 
     def paint(self, painter: QtGui.QPainter,
               option: QtWidgets.QStyleOptionGraphicsItem,
               widget: Optional[QtWidgets.QWidget] = None) -> None:
+        super().paint(painter, option, widget)
         rect = self.rect()
-        self._icon.paint(painter, rect.toAlignedRect(),
-                         alignment=self._alignment)
+        if isinstance(self._image, QtGui.QIcon):
+            self._image.paint(painter, rect.toAlignedRect(),
+                              alignment=self._alignment)
+        elif isinstance(self._image, QtGui.QPixmap):
+            painter.drawPixmap(rect, self._image)
 
 
 @graphictype("controls.marquee")
@@ -504,7 +530,7 @@ class AbstractTextGraphic(core.RectangleGraphic):
     def isBackgroundVisible(self) -> bool:
         return self._bg_visible
 
-    def setBackgrooundVisible(self, visible: bool):
+    def setBackgroundVisible(self, visible: bool) -> None:
         self._bg_visible = visible
         self.update()
 
@@ -513,7 +539,7 @@ class AbstractTextGraphic(core.RectangleGraphic):
 
     @settable()
     def setFontFamily(self, family: str) -> None:
-        font = QtGui.QFont()
+        font = self.font()
         font.setFamily(family)
         self.setFont(font)
 
@@ -527,6 +553,12 @@ class AbstractTextGraphic(core.RectangleGraphic):
     def setItalic(self, italic: bool) -> None:
         font = self.font()
         font.setItalic(italic)
+        self.setFont(font)
+
+    @settable(argtype=QtGui.QFont.Weight)
+    def setWeight(self, weight: int) -> None:
+        font = self.font()
+        font.setWeight(weight)
         self.setFont(font)
 
     def margins(self) -> QtCore.QMarginsF:
@@ -569,8 +601,8 @@ class AbstractTextGraphic(core.RectangleGraphic):
         raise NotImplementedError
 
     def setGlyph(self, glyph: glyphs.Glyph) -> None:
-        self.setTextAlignment(Qt.AlignCenter)
-        font = QtGui.QFont()
+        # self.setTextAlignment(Qt.AlignCenter)
+        font = self.font()
         font_fam, font_weight = glyph.familyAndWeight()
         font.setFamily(font_fam)
         if font_weight is not None:
@@ -578,7 +610,7 @@ class AbstractTextGraphic(core.RectangleGraphic):
             font.setWeight(font_weight)
         self.setFont(font)
         self.setText(chr(glyph.value))
-        self.setCacheMode(self.ItemCoordinateCache)
+        # self.setCacheMode(self.ItemCoordinateCache)
 
     @settable("glyph")
     def setGlyphName(self, name: str) -> None:
@@ -609,7 +641,7 @@ class AbstractTextGraphic(core.RectangleGraphic):
         text_tint = self._text_tint
         if color and text_tint and self._text_tint_amount:
             color = themes.blend(color, text_tint, self._text_tint_amount)
-        return color
+        return QtGui.QColor(color)
 
     def _updateColors(self) -> None:
         raise NotImplementedError
@@ -636,10 +668,31 @@ class StringGraphic(AbstractTextGraphic):
         # self._item.setFlag(self.ItemIsFocusable, False)
         self._alignment = Qt.AlignLeft
         self._elide_mode: Qt.TextElideMode = Qt.ElideNone
+        self._line_width = 0.0
+        self._line_alpha = 0.1
+        self._line_gap = 10.0
 
         # self.geometryChanged.connect(self._updateContents)
         self._updateSize()
         # self._updateContents()
+
+    def textToCopy(self) -> str:
+        return self._text
+
+    @settable()
+    def setLineMargin(self, gap: float) -> None:
+        self._line_gap = gap
+        self.update()
+
+    @settable()
+    def setLineWidth(self, width: float) -> None:
+        self._line_width = width
+        self.update()
+
+    @settable()
+    def setLineAlpha(self, alpha: float) -> None:
+        self._line_alpha = alpha
+        self.update()
 
     def text(self) -> str:
         return self._text
@@ -659,7 +712,6 @@ class StringGraphic(AbstractTextGraphic):
     def setTextAlignment(self, align: Qt.Alignment) -> None:
         self._alignment = align
         self.update()
-        # self._updateContents()
 
     # def font(self) -> QtGui.QFont:
     #     return self._item.font()
@@ -684,7 +736,7 @@ class StringGraphic(AbstractTextGraphic):
 
     def isCompact(self) -> bool:
         return self._compact
-    
+
     @settable(argtype=bool)
     def setCompact(self, compact: bool) -> None:
         self.prepareGeometryChange()
@@ -743,6 +795,32 @@ class StringGraphic(AbstractTextGraphic):
             return size
         return constraint
 
+    def _paintDividerLine(self, painter: QtGui.QPainter) -> None:
+        rect = self.rect()
+        width = self._text_size.width()
+        ctr = rect.center()
+        y = ctr.y()
+        gap = self._line_gap
+        align = self.textAlignment()
+        color = self.effectiveTextColor()
+        color.setAlphaF(self._line_alpha)
+        painter.setPen(QtGui.QPen(color, self._line_width))
+        if align & Qt.AlignLeft:
+            p1 = QtCore.QPointF(rect.x() + width + gap, y)
+            p2 = QtCore.QPointF(rect.right(), y)
+            painter.drawLine(p1, p2)
+        elif align & Qt.AlignRight:
+            p1 = QtCore.QPointF(rect.x(), y)
+            p2 = QtCore.QPointF(rect.right() - width - gap, y)
+            painter.drawLine(p1, p2)
+        else:
+            p1 = QtCore.QPointF(rect.x(), y)
+            p2 = QtCore.QPointF(ctr.x() - width / 2 - gap, y)
+            painter.drawLine(p1, p2)
+            p1 = QtCore.QPointF(ctr.x() + width / 2 + gap, y)
+            p2 = QtCore.QPointF(rect.right(), y)
+            painter.drawLine(p1, p2)
+
     def paint(self, painter: QtGui.QPainter,
               option: QtWidgets.QStyleOptionGraphicsItem,
               widget: Optional[QtWidgets.QWidget] = None) -> None:
@@ -765,6 +843,54 @@ class StringGraphic(AbstractTextGraphic):
         painter.setFont(font)
         painter.setPen(color)
         painter.drawText(rect, self._alignment, text)
+
+        if self._line_width:
+            self._paintDividerLine(painter)
+
+
+@graphictype("controls.numeric_string")
+class NumericStringGraphic(StringGraphic):
+    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
+        super().__init__(parent=parent)
+        self._value: Optional[str, int, float] = None
+        self._formatter: formatting.NumberFormatter = \
+            formatting.NumberFormatter()
+        self._formatter.setBriefMode(formatting.BriefMode.auto)
+
+    def textToCopy(self) -> str:
+        return str(self._value)
+
+    def formatter(self) -> formatting.NumberFormatter:
+        return self._formatter
+
+    @settable(converter=converters.formatConverter)
+    def setFormatter(self, formatter: formatting.NumberFormatter):
+        self._formatter = formatter
+
+    @settable("brief")
+    def setBriefMode(self, brief: formatting.BriefMode):
+        self.formatter().setBriefMode(brief)
+
+    @settable()
+    def setValue(self, value: Union[str, int, float, None]):
+        if value is None:
+            self.setText("")
+            return
+        if isinstance(value, str):
+            value = float(value)
+        self._value = value
+        fmt = self.formatter()
+        if not isinstance(value, (str, int, float)):
+            raise ValueError(f"{self}: {value!r} is not a number")
+        fmtnum = fmt.formatNumber(value)
+        self.setText(fmtnum.plainText())
+
+
+@graphictype("controls.divider")
+class DividerGraphic(StringGraphic):
+    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
+        super().__init__(parent)
+        self._line_width = 1.0
 
 
 @graphictype("controls.text")
@@ -811,9 +937,10 @@ class TextGraphic(AbstractTextGraphic):
         if event.type() == event.PaletteChange:
             self._colors_changed = True
 
-    def contextMenuEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
-        print("context menu=", event)
-        self.scene().sendEvent(self._item, event)
+    # def contextMenuEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
+    #     print("context menu=", event)
+    #     # self.scene().sendEvent(self._item, event)
+    #     event.accept()
 
     def document(self) -> QtGui.QTextDocument:
         return self._item.document()
@@ -847,6 +974,9 @@ class TextGraphic(AbstractTextGraphic):
     def plainText(self) -> str:
         return self._item.toPlainText()
 
+    def textToCopy(self) -> str:
+        return self.plainText()
+
     @settable("plain_text")
     def setPlainText(self, text: str):
         self._saved = (str(text), False)
@@ -867,6 +997,13 @@ class TextGraphic(AbstractTextGraphic):
     @settable("text")
     def setText(self, text: str):
         self.setHtml(text)
+
+    @settable(argtype=bool)
+    def setWordWrap(self, wrap: bool) -> None:
+        doc = self.document()
+        option = doc.defaultTextOption()
+        option.setWrapMode(option.WordWrap if wrap else option.NoWrap)
+        doc.setDefaultTextOption(option)
 
     def _updateContents(self):
         self.document().setDefaultTextOption(QtGui.QTextOption(self._alignment))
@@ -1123,6 +1260,12 @@ class ColorChangeRectangle(core.RectangleGraphic):
     def stopBlendAnimation(self) -> None:
         self.stopPropertyAnimation(b"blend")
 
+    def effectiveBrush(self) -> QtGui.QBrush:
+        if self._blend == 0.0:
+            return super().effectiveBrush()
+        else:
+            return QtGui.QBrush(self.effectiveFillColor())
+
     def effectiveFillColor(self) -> QtGui.QColor:
         c1 = super().effectiveFillColor()
         if not c1:
@@ -1135,6 +1278,7 @@ class ColorChangeRectangle(core.RectangleGraphic):
 @graphictype("controls.switch")
 class SwitchButtonGraphic(core.ClickableGraphic):
     stateChanged = QtCore.Signal(Qt.CheckState)
+    toggled = QtCore.Signal(bool)
 
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
@@ -1232,8 +1376,9 @@ class SwitchButtonGraphic(core.ClickableGraphic):
         self.setCheckState(Qt.Checked if checked else Qt.Unchecked,
                            animated=animated)
 
-    def toggle(self, *, animated=False) -> None:
+    def toggle(self, *, animated=True) -> None:
         self.setChecked(not self.isChecked(), animated=animated)
+        self.toggled.emit(self.isChecked())
 
     @settable()
     def setDotRadius(self, radius: float) -> None:
@@ -1303,7 +1448,7 @@ class SwitchButtonGraphic(core.ClickableGraphic):
 
     def onMousePress(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
         event.accept()
-        self.setChecked(not self.isChecked(), animated=True)
+        self.toggle()
 
     def onMouseRelease(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
         event.accept()
@@ -1333,12 +1478,12 @@ class LabeledSwitchGraphic(core.LayoutGraphic):
         self.setHasHeightForWidth(True)
         self.geometryChanged.connect(self._updateContents)
 
-    @path_element(SwitchButtonGraphic, "switch")
-    def switchItem(self) -> SwitchButtonGraphic:
+    @path_element(SwitchButtonGraphic)
+    def switch(self) -> SwitchButtonGraphic:
         return self._switch
 
-    @path_element(TextGraphic, "label")
-    def labelItem(self) -> TextGraphic:
+    @path_element(TextGraphic)
+    def label(self) -> TextGraphic:
         return self._label
 
     def eventFilter(self, watched: TextGraphic, event: QtCore.QEvent) -> bool:
@@ -1376,20 +1521,20 @@ class LabeledSwitchGraphic(core.LayoutGraphic):
         self.layout().setSpacing(space)
 
     def checkState(self) -> Qt.CheckState:
-        return self._switch.checkState()
+        return self.switch().checkState()
 
     def setCheckState(self, state: Qt.CheckState) -> None:
-        self._switch.setCheckState(state)
+        self.switch().setCheckState(state)
 
     def isChecked(self) -> bool:
-        return self._switch.isChecked()
+        return self.switch().isChecked()
 
     @settable(argtype=bool)
     def setChecked(self, checked: bool, *, animated=False) -> None:
-        self._switch.setChecked(checked, animated=animated)
+        self.switch().setChecked(checked, animated=animated)
 
     def toggle(self, *, animated=False) -> None:
-        self._switch.toggle(animated=animated)
+        self.switch().toggle(animated=animated)
 
     def setFont(self, font: QtGui.QFont) -> None:
         self.prepareGeometryChange()
@@ -1466,9 +1611,11 @@ class ButtonGraphic(core.ClickableGraphic):
         self._colors_changed = False
         self._clickable = True
         self.setAcceptHoverEvents(True)
-        self._alignment = Qt.AlignCenter
+        self._label_align = Qt.AlignCenter
         self._rect = QtCore.QRectF()
         self._label_margins = QtCore.QMarginsF(16, 8, 16, 8)
+        self._fills_space = True
+        self._self_align = Qt.AlignCenter
 
         self._halo = core.RectangleGraphic(self)
         self._halo.setZValue(-5)
@@ -1480,11 +1627,12 @@ class ButtonGraphic(core.ClickableGraphic):
         self._halo_duration = 200
 
         self._bg = ColorChangeRectangle(self)
-        self._bg.setZValue(-1)
+        self._bg.setZValue(-4)
         self._bg.setFillColor(ThemeColor.button)
         self._bg.setAltColor(ThemeColor.pressed)
 
-        self.setGlint(True)
+        # Buttons have glint by default
+        self.setFlat(False)
 
         self._checkable = False
         self._uncheckable = True
@@ -1496,6 +1644,7 @@ class ButtonGraphic(core.ClickableGraphic):
 
         self._draw_menu_glyph = True
         self._menu_glyph = StringGraphic(self)
+        self._menu_glyph.setTextAlignment(Qt.AlignCenter)
         self._menu_glyph.setTextSize(10)
         self._menu_glyph.setGlyph(glyphs.FontAwesome.chevron_down)
         self._menu_glyph.setTextColor(ThemeColor.button_fg)
@@ -1543,16 +1692,16 @@ class ButtonGraphic(core.ClickableGraphic):
             "checked": self.isChecked()
         }
 
-    @path_element(core.RectangleGraphic, "bg")
-    def backgroundItem(self) -> core.RectangleGraphic:
+    @path_element(core.RectangleGraphic)
+    def background(self) -> core.RectangleGraphic:
         return self._bg
 
-    @path_element(StringGraphic, "label")
-    def labelItem(self) -> StringGraphic:
+    @path_element(StringGraphic)
+    def label(self) -> StringGraphic:
         return self._label
 
-    @path_element(StringGraphic, "checkmark")
-    def checkmarkItem(self) -> StringGraphic:
+    @path_element(StringGraphic)
+    def checkmark(self) -> StringGraphic:
         return self._checkmark
 
     def checkState(self) -> Qt.CheckState:
@@ -1564,21 +1713,16 @@ class ButtonGraphic(core.ClickableGraphic):
         self._halo.setCornerRadius(radius)
 
     @settable(argtype=bool)
-    def setGlint(self, glint: bool) -> None:
-        if glint:
+    def setFlat(self, flat: bool) -> None:
+        if flat:
+            self._bg.setPen(Qt.NoPen)
+        else:
             glint = QtGui.QLinearGradient(0, 0, 0, 1)
             glint.setColorAt(0.0, QtGui.QColor.fromRgbF(1, 1, 1, 0.3))
             glint.setColorAt(0.2, Qt.transparent)
             glint.setCoordinateMode(glint.ObjectMode)
             pen = QtGui.QPen(QtGui.QBrush(glint), 1.0)
             self._bg.setPen(pen)
-        else:
-            self._bg.setPen(Qt.NoPen)
-
-    @settable()
-    def setCornerRadius(self, radius: float) -> None:
-        self._bg.setCornerRadius(radius)
-        self._halo.setCornerRadius(radius)
 
     @settable(argtype=bool)
     def setPillShaped(self, is_pill: bool) -> None:
@@ -1698,13 +1842,13 @@ class ButtonGraphic(core.ClickableGraphic):
         #     self._label.deleteLater()
         self._label = graphic
         self._label.setParentItem(self)
-        self._label.setZValue(3)
+        self._label.setZValue(1)
         self._updateContents()
         self.update()
 
     @settable(argtype=QtGui.QColor)
     def setLabelColor(self, color: QtGui.QColor) -> None:
-        label = self.labelItem()
+        label = self.label()
         if label:
             if isinstance(label, AbstractTextGraphic):
                 label.setTextColor(color)
@@ -1730,10 +1874,22 @@ class ButtonGraphic(core.ClickableGraphic):
         self.updateGeometry()
         self._updateContents()
 
+    def setBorderColor(self, color: converters.ColorSpec) -> None:
+        self.background().setBorderColor(color)
+
+    def setBorderWidth(self, width: float) -> None:
+        self.background().setBorderWidth(width)
+
+    def setTextSize(self, size: int) -> None:
+        self.label().setTextSize(size)
+
+    def setTextColor(self, color: converters.ColorSpec) -> None:
+        self.label().setTextColor(color)
+
     def setGlyph(self, glyph: glyphs.Glyph) -> None:
         self.prepareGeometryChange()
         self.setLabelMargins(QtCore.QMarginsF(4, 4, 4, 4))
-        label = self.labelItem()
+        label = self.label()
         label.setGlyph(glyph)
         super().setFont(label.font())
         self.updateGeometry()
@@ -1756,11 +1912,11 @@ class ButtonGraphic(core.ClickableGraphic):
         if isinstance(label, AbstractTextGraphic):
             return label.textAlignment()
         else:
-            return self._alignment
+            return self._label_align
 
-    @settable(argtype=Qt.Alignment)
+    @settable("label_align", argtype=Qt.Alignment)
     def setLabelAlignment(self, align: Qt.Alignment):
-        self._alignment = align
+        self._label_align = align
         label = self._label
         if isinstance(label, AbstractTextGraphic):
             label.setTextAlignment(align)
@@ -1783,6 +1939,22 @@ class ButtonGraphic(core.ClickableGraphic):
         if self._label:
             self._label.setFont(font)
         self._menu_glyph.setTextSize(int(font.pixelSize() * 0.8))
+        self._updateContents()
+
+    def fillsSpace(self) -> bool:
+        return self._fills_space
+
+    @settable("fill_space", argtype=bool)
+    def setFillsSpace(self, fill: bool) -> None:
+        self._fills_space = fill
+        self._updateContents()
+
+    def alignmentInSpace(self) -> Qt.Alignment:
+        return self._self_align
+
+    @settable("align", argtype=Qt.Alignment)
+    def setAlignmentInSpace(self, align: Qt.Alignment) -> None:
+        self._self_align = align
         self._updateContents()
 
     def click(self) -> None:
@@ -1824,12 +1996,17 @@ class ButtonGraphic(core.ClickableGraphic):
 
         return rect
 
-    def _bgRect(self) -> QtCore.QRectF:
-        return self.rect()
+    def _bodyRect(self) -> QtCore.QRectF:
+        rect = self.rect()
+        if self.fillsSpace():
+            return rect
+        else:
+            return util.alignedRectF(self.layoutDirection(), self._self_align,
+                                     self.implicitSize(), rect)
 
     def _labelRect(self) -> QtCore.QRectF:
-        rect = self.rect()
-        label = self.labelItem()
+        rect = self._bodyRect()
+        label = self.label()
         label_rect = self._contentRect()
         check_size = self._checkmarkSize()
 
@@ -1847,7 +2024,7 @@ class ButtonGraphic(core.ClickableGraphic):
                 Qt.PreferredSize, QtCore.QSizeF(label_rect.width(), -1)
             )
         label_rect = util.alignedRectF(
-            self.layoutDirection(), self._alignment, sz, label_rect
+            self.layoutDirection(), self._label_align, sz, label_rect
         )
 
         if self._draw_check and self.isChecked() and label_rect.width():
@@ -1863,7 +2040,7 @@ class ButtonGraphic(core.ClickableGraphic):
         label_rect = label_rect or self._labelRect()
         check_size = self._checkmarkSize()
         check_rect = util.alignedRectF(
-            self.layoutDirection(), self._alignment, check_size, self.rect()
+            self.layoutDirection(), self._label_align, check_size, self.rect()
         )
         check_rect.moveRight(label_rect.x() - self._spacing)
         return check_rect
@@ -1904,17 +2081,16 @@ class ButtonGraphic(core.ClickableGraphic):
             checkmark.hide()
 
     def _updateContents(self) -> None:
-        rect = self.rect()
-        center = rect.center()
+        center = self.rect().center()
         self.setTransformOriginPoint(center)
 
-        self._bg.setGeometry(self._bgRect())
+        body_rect = self._bodyRect()
+        self._bg.setGeometry(body_rect)
         self._bg.setTransformOriginPoint(center)
 
-        bg_rect = self._bgRect()
         hoff = self._halo_offset
-        self._halo.setGeometry(bg_rect.adjusted(-hoff, -hoff, hoff, hoff))
-        self._halo.setTransformOriginPoint(center)
+        self._halo.setGeometry(body_rect.adjusted(-hoff, -hoff, hoff, hoff))
+        self._halo.setTransformOriginPoint(body_rect.center())
 
         self._updateLabelPositions()
 
@@ -1923,23 +2099,29 @@ class ButtonGraphic(core.ClickableGraphic):
             self._menu_glyph.setGeometry(self._menuGlyphRect())
         self._menu_glyph.setVisible(show_menu_glyph)
 
+    def hasImplicitSize(self) -> bool:
+        return True
+
+    def implicitSize(self) -> QtCore.QSizeF:
+        ms = self.labelMargins()
+        sz = self._contentSizeHint(Qt.PreferredSize, None)
+        w = sz.width() + ms.left() + ms.right()
+        # if self.drawingMenuGlyph():
+        #     w += self._menu_glyph.implicitSize() + self._spacing
+        h = sz.height() + ms.top() + ms.bottom()
+        return QtCore.QSizeF(w, h)
+
     def sizeHint(self, which: Qt.SizeHintRole, constraint: QtCore.QSizeF = None
                  ) -> QtCore.QSizeF:
         constraint = constraint or QtCore.QSizeF(-1, -1)
         if which == Qt.PreferredSize:
-            ms = self.labelMargins()
-            sz = self._contentSizeHint(which, constraint)
-            w = sz.width() + ms.left() + ms.right()
-            # if self.drawingMenuGlyph():
-            #     w += self._menu_glyph.implicitSize() + self._spacing
-            h = sz.height() + ms.top() + ms.bottom()
-            return QtCore.QSizeF(w, h)
+            return self.implicitSize()
         else:
             return constraint
 
     def _contentSizeHint(self, which: Qt.SizeHintRole,
-                         constraint: QtCore.QSizeF) -> QtCore.QSizeF:
-        sz = self._label.effectiveSizeHint(which, constraint)
+                         constraint: QtCore.QSizeF = None) -> QtCore.QSizeF:
+        sz = self._label.implicitSize()
         if self.isCheckable() and self.isDrawingCheckmark():
             w = sz.width() + self._checkmarkSize().width() + self._spacing
             sz.setWidth(w)
@@ -1953,38 +2135,48 @@ class ButtonGraphic(core.ClickableGraphic):
         return self._halo_offset
 
     def setHaloOffsetValue(self, off: float) -> None:
-        bg_rect = self._bgRect()
+        bg_rect = self._bodyRect()
         self._halo_offset = off
         self._halo.setGeometry(bg_rect.adjusted(-off, -off, off, off))
 
     haloOffset = QtCore.Property(float, haloOffsetValue, setHaloOffsetValue)
 
     def _animatePress(self) -> None:
-        self._bg.animateBlend(1.0)
-        if self._use_halo:
-            self._halo.show()
-            self._halo.setOpacity(self._halo_opacity)
-            self.animateProperty(
-                b"haloOffset", self.haloOffsetValue(), 4.0,
-                curve=QtCore.QEasingCurve.OutBack, duration=self._halo_duration
-            )
+        if not self.animationDisabled():
+            self._bg.animateBlend(1.0)
+            if self._use_halo:
+                self._halo.show()
+                self._halo.setOpacity(self._halo_opacity)
+                self.animateProperty(
+                    b"haloOffset", self.haloOffsetValue(), 4.0,
+                    curve=QtCore.QEasingCurve.OutBack, duration=self._halo_duration
+                )
+        else:
+            self._bg.setBlendValue(1.0)
 
     def _animateRelease(self) -> None:
-        self._bg.animateBlend(0.0)
-        if self._use_halo:
-            self.animateProperty(
-                b"haloOffset", self.haloOffsetValue(), 0.0,
-                duration=self._halo_duration
-            )
+        if not self.animationDisabled():
+            self._bg.animateBlend(0.0)
+            if self._use_halo:
+                self.animateProperty(
+                    b"haloOffset", self.haloOffsetValue(), 0.0,
+                    duration=self._halo_duration
+                )
+        else:
+            self._bg.setBlendValue(0.0)
 
     def _animateTrigger(self) -> None:
-        self._bg.animateBlend(1.0 if self.isChecked() else 0.0)
-        if self._use_halo:
-            self._halo.show()
-            self._halo.setOpacity(self._halo_opacity)
-            self.animateProperty(b"haloOffset", self.haloOffsetValue(), 8.0)
-            self._halo.fadeOut(curve=QtCore.QEasingCurve.Linear,
-                               callback=self._resetHalo)
+        blend = 1.0 if self.isChecked() else 0.0
+        if not self.animationDisabled():
+            self._bg.animateBlend(blend)
+            if self._use_halo:
+                self._halo.show()
+                self._halo.setOpacity(self._halo_opacity)
+                self.animateProperty(b"haloOffset", self.haloOffsetValue(), 8.0)
+                self._halo.fadeOut(curve=QtCore.QEasingCurve.Linear,
+                                   callback=self._resetHalo)
+        else:
+            self._bg.setBlendValue(blend)
 
     def _resetHalo(self) -> None:
         self.setHaloOffsetValue(0.0)
@@ -2067,7 +2259,7 @@ class FancyButtonGraphic(ButtonGraphic):
 
 
 @graphictype("controls.simple_checkbox")
-class SimpleCheckboxGraphic(StringGraphic):
+class SimpleCheckboxGraphic(core.AreaGraphic):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
         self._check_blend = 0.0
@@ -2075,15 +2267,25 @@ class SimpleCheckboxGraphic(StringGraphic):
         self._change_expr: Optional[config.Expr] = None
         self._click_expr: Optional[config.Expr] = None
 
-        self._bg_off = ThemeColor.button
+        self._bg_off = ThemeColor.surface_lowest
         self._bg_on = ThemeColor.primary
-        self._dot_off = ThemeColor.button
+        self._dot_off = ThemeColor.button_high
         self._dot_on = ThemeColor.pressed
+
+        self._implicit_size = QtCore.QSizeF(16.0, 16.0)
+        self._dot_size = 8.0
+        self._dot_margin = 1.0
 
     _bg_off = DynamicColor()
     _bg_on = DynamicColor()
     _dot_off = DynamicColor()
     _dot_on = DynamicColor()
+
+    @settable(argtype=QtCore.QSizeF)
+    def setSize(self, size: QtCore.QSize) -> None:
+        self.setFixedSize(size)
+        self._implicit_size = size
+        self.updateGeometry()
 
     @settable("off_bg_color", converter=converters.colorConverter)
     def setOffBackgroundColor(self, color: converters.ColorSpec) -> None:
@@ -2100,6 +2302,16 @@ class SimpleCheckboxGraphic(StringGraphic):
     @settable("on_dot_color", converter=converters.colorConverter)
     def setOnDotColor(self, color: converters.ColorSpec) -> None:
         self._dot_on = color
+
+    @settable()
+    def setDotSize(self, size: float) -> None:
+        self._dot_size = size
+        self.update()
+
+    @settable()
+    def setDotMargin(self, margin: float) -> None:
+        self._dot_margin = margin
+        self.update()
 
     def _checkBlend(self) -> float:
         return self._check_blend
@@ -2190,35 +2402,29 @@ class SimpleCheckboxGraphic(StringGraphic):
               option: QtWidgets.QStyleOptionGraphicsItem,
               widget: Optional[QtWidgets.QWidget] = None) -> None:
         rect = self.rect()
-        inner = rect.marginsRemoved(self.margins())
-        if not inner.isValid():
-            return
-
-        width = self._text_size.width()
-        side = max(width, min(inner.width(), inner.height()))
+        dsize = self._dot_size
+        dm = self._dot_margin
+        width = rect.width()
+        height = dsize + dm * 2
+        track_y = rect.center().y() - height / 2
+        outer = QtCore.QRectF(rect.x(), track_y, width, height)
+        inner = outer.adjusted(dm, dm, -dm, -dm)
 
         blend = self._checkBlend()
         bg_c = themes.blend(self._bg_off, self._bg_on, blend)
         dot_c = themes.blend(self._dot_off, self._dot_on, blend)
 
         x1 = inner.x()
-        x2 = inner.right() - side
+        x2 = inner.right() - dsize
         x = x1 + (x2 - x1) * blend
+        dot_rect = QtCore.QRectF(x, inner.y(), dsize, dsize)
 
         painter.setPen(Qt.NoPen)
         painter.setBrush(bg_c)
-        outer_r = min(rect.width(), rect.height()) / 2
-        painter.drawRoundedRect(rect, outer_r, outer_r)
+        painter.drawRoundedRect(outer, height / 2, height / 2)
 
-        box = QtCore.QRectF(x, inner.y(), side, side)
         painter.setBrush(dot_c)
-        painter.drawRoundedRect(box, side / 2, side / 2)
-
-        painter.setBrush(Qt.NoBrush)
-        color = self.effectiveTextColor()
-        painter.setFont(self.font())
-        painter.setPen(color)
-        painter.drawText(box, Qt.AlignCenter, self.text())
+        painter.drawRoundedRect(dot_rect, dsize / 2, dsize / 2)
 
 
 @graphictype("controls.checkbox")
@@ -2229,7 +2435,7 @@ class CheckboxGraphic(ButtonGraphic):
         self._gap = 5.0
         self.setCheckable(True)
         self.setLabelMargins(QtCore.QMarginsF(0, 0, 0, 0))
-        self.labelItem().setTextAlignment(Qt.AlignLeft)
+        self.label().setTextAlignment(Qt.AlignLeft)
 
     def boxSize(self) -> QtCore.QSizeF:
         return self._box_size
@@ -2246,39 +2452,80 @@ class CheckboxGraphic(ButtonGraphic):
         self._gap = gap
         self._updateLabelPositions()
 
-    def _bgRect(self) -> QtCore.QRectF:
+    def _bodyRect(self) -> QtCore.QRectF:
         return util.alignedRectF(self.layoutDirection(), Qt.AlignLeft,
                                  self.boxSize(), self.rect())
 
     def _labelRect(self) -> QtCore.QRectF:
         rect = self.rect()
-        bg_rect = self._bgRect()
+        bg_rect = self._bodyRect()
         rect.setLeft(bg_rect.right() + self.spacing())
         return rect
 
     def _checkmarkRect(self, label_rect: QtCore.QRectF = None
                        ) -> QtCore.QRectF:
-        return self._bgRect()
+        return self._bodyRect()
 
 
 @graphictype("controls.tool_button")
 class ToolButtonGraphic(ButtonGraphic):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
-        super().__init__(parent)
+        self._orientation = Qt.Horizontal
+        self._icon: Optional[StringGraphic | PixmapGraphic] = None
+        self._label_blend = 0.0
         # Track these separately from the actual .isVisible() of the items
         # because they might be fading out but still visible
         self._label_visible = False
         self._icon_visible = False
-        self._label_blend = 0.0
-        self._orientation = Qt.Horizontal
+
+        super().__init__(parent)
+
         self._text_before_icon = False
         self._icon = StringGraphic(self)
-
+        self._icon.setTextAlignment(Qt.AlignCenter)
+        self._alt_icon: Optional[StringGraphic | PixmapGraphic] = None
         self.setLabelMargins(QtCore.QMarginsF(8, 8, 8, 8))
 
-    @path_element(StringGraphic, "icon")
-    def iconItem(self) -> StringGraphic:
+    @path_element(Graphic)
+    def iconItem(self) -> Optional[Graphic]:
         return self._icon
+
+    @path_element(StringGraphic)
+    def glyphItem(self) -> StringGraphic:
+        if not isinstance(self._icon, StringGraphic):
+            self._icon = StringGraphic(self)
+            self._icon.setTextAlignment(Qt.AlignCenter)
+            self._icon.setVisible(self._icon_visible)
+        return self._icon
+
+    def setGlyph(self, glyph: glyphs.Glyph) -> None:
+        self.glyphItem().setGlyph(glyph)
+        if not self._icon_visible:
+            self.setIconVisible(True, animated=False)
+
+    @path_element(PixmapGraphic)
+    def pixmapItem(self) -> PixmapGraphic:
+        if not isinstance(self._icon, PixmapGraphic):
+            self._icon = PixmapGraphic(self)
+            self._icon.setVisible(self._icon_visible)
+        return self._icon
+
+    @settable("image")
+    def setImagePath(self, path: pathlib.Path | str) -> None:
+        self.pixmapItem().setPath(path)
+        if not self._icon_visible:
+            self.setIconVisible(True, animated=False)
+
+    def setIcon(self, icon: QtGui.QIcon) -> None:
+        self.pixmapItem().setIcon(icon)
+        if not self._icon_visible:
+            self.setIconVisible(True, animated=False)
+
+    @settable()
+    def setHoudiniIcon(self, name: str):
+        self.pixmapItem().setHoudiniIcon(name)
+        if not self._icon_visible:
+            self.setIconVisible(True, animated=False)
 
     def orientation(self) -> Qt.Orientation:
         return self._orientation
@@ -2286,6 +2533,7 @@ class ToolButtonGraphic(ButtonGraphic):
     @settable(argtype=Qt.Orientation)
     def setOrientation(self, orient: Qt.Orientation) -> None:
         self._orientation = orient
+        self._updateContents()
 
     def isTextBeforeIcon(self) -> bool:
         return self._text_before_icon
@@ -2293,6 +2541,7 @@ class ToolButtonGraphic(ButtonGraphic):
     @settable()
     def setTextBeforeIcon(self, reverse: bool) -> None:
         self._text_before_icon = reverse
+        self._updateContents()
 
     def labelBlendValue(self) -> float:
         return self._label_blend
@@ -2302,11 +2551,6 @@ class ToolButtonGraphic(ButtonGraphic):
         self.updateGeometry()
 
     labelBlend = QtCore.Property(float, labelBlendValue, setLabelBlendValue)
-
-    def setGlyph(self, glyph: glyphs.Glyph) -> None:
-        self.iconItem().setGlyph(glyph)
-        if not self._icon_visible:
-            self.setIconVisible(True, animated=False)
 
     @settable()
     def setText(self, text: str) -> None:
@@ -2395,10 +2639,11 @@ class ToolButtonGraphic(ButtonGraphic):
         return icon_rect
 
     def _contentSizeHint(self, which: Qt.SizeHintRole,
-                         constraint: QtCore.QSizeF) -> QtCore.QSizeF:
+                         constraint: QtCore.QSizeF = None) -> QtCore.QSizeF:
         horiz = self._orientation == Qt.Horizontal
-        icon_size = self._icon.implicitSize()
-        label_size = self._label.implicitSize()
+        icon_size = self._icon.implicitSize() if self._icon else QtCore.QSizeF()
+        label_size = (self._label.implicitSize() if self._label else
+                      QtCore.QSizeF())
         blend = self._label_blend
         gap = self._spacing
         w = h = 0.0
@@ -2426,9 +2671,10 @@ class ToolButtonGraphic(ButtonGraphic):
 
     def _updateChecked(self, animated=True) -> None:
         super()._updateChecked(animated=animated)
-        text_role = (ThemeColor.pressed_fg if self.isChecked()
-                     else ThemeColor.button_fg)
-        self._icon.setTextColor(text_role)
+        if self._icon and isinstance(self._icon, StringGraphic):
+            text_role = (ThemeColor.pressed_fg if self.isChecked()
+                         else ThemeColor.button_fg)
+            self._icon.setTextColor(text_role)
 
 
 @graphictype("controls.slider")
@@ -2470,8 +2716,8 @@ class SliderGraphic(core.RectangleGraphic):
         self._handle.setPillShaped(True)
         self._handle.setFillColor(ThemeColor.button)
         self._handle.setPressedColor(ThemeColor.primary)
-        self._handle.backgroundItem().setBorderColor(ThemeColor.button_high)
-        self._handle.backgroundItem().setBorderWidth(2.0)
+        self._handle.background().setBorderColor(ThemeColor.button_high)
+        self._handle.background().setBorderWidth(2.0)
         self._handle.resize(16, 16)
         self._handle.setZValue(1)
 
@@ -2505,12 +2751,12 @@ class SliderGraphic(core.RectangleGraphic):
 
         self._positionHandle(animated=animated)
 
-    @path_element(ButtonGraphic, "handle")
-    def handleItem(self) -> ButtonGraphic:
+    @path_element(ButtonGraphic)
+    def handle(self) -> ButtonGraphic:
         return self._handle
 
-    @path_element(core.RectangleGraphic, "track")
-    def trackItem(self) -> core.RectangleGraphic:
+    @path_element(core.RectangleGraphic)
+    def track(self) -> core.RectangleGraphic:
         return self._track
 
     def handleSize(self) -> QtCore.QSizeF:
@@ -2821,7 +3067,7 @@ class PopupMenuGraphic(ButtonGraphic):
 
         self._widget.currentTextChanged.connect(self._onTextChanged)
 
-    @path_element(QtWidgets.QComboBox, "combobox")
+    @path_element(QtWidgets.QComboBox)
     def comboBox(self) -> QtWidgets.QComboBox:
         return self._widget
 
@@ -2868,8 +3114,6 @@ class ToolbarGraphic(core.RectangleGraphic):
         layout = layouts.ArrangementLayout(self._arrangement)
         self.setLayout(layout)
 
-        self.geometryChanged.connect(self._updateShape)
-
     @path_element(layouts.LinearArrangement)
     def arrangement(self) -> layouts.LinearArrangement:
         return self._arrangement
@@ -2914,22 +3158,22 @@ class ToolbarGraphic(core.RectangleGraphic):
             self.layout().insertItem(index, item)
 
     def addButton(self, text: str = None, index: int = None, *,
-                  glyph: glyphs.Glyph = None,
+                  glyph: glyphs.Glyph = None, icon: QtGui.QIcon = None,
                   font_size: int = None,
                   checkable=False, checked=False, draw_check=True,
                   width: float = None, height: float = None,
-                  min_width=20.0, min_height=20.0,
+                  min_width=24.0, min_height=24.0,
                   size: QtCore.QSize = None, enabled=True, visible=True,
-                  name: str = None,
-                  cls: type[ButtonGraphic] = ToolButtonGraphic
-                  ) -> ButtonGraphic:
-        button = cls(self)
+                  name: str = None) -> ButtonGraphic:
+        button = ToolButtonGraphic(self)
         if name:
             button.setObjectName(name)
         if text:
             button.setText(text)
         if glyph:
             button.setGlyph(glyph)
+        elif icon:
+            button.setIcon(icon)
 
         button.setFontSize(font_size if font_size is not None
                            else self._text_size)
@@ -2967,17 +3211,6 @@ class ToolbarGraphic(core.RectangleGraphic):
         return self._arrangement.sizeHint(which, constraint,
                                           self._visibleItems())
 
-    def _updateShape(self) -> None:
-        rect = self.rect()
-        arng = self._arrangement
-        if not self._items:
-            return
-
-        item_rects = [r for _, r
-                      in arng.rects(Qt.PreferredSize, rect, self._items)]
-        r = util.containingRectF(item_rects)
-        self._shape = self._shapeForRect(r)
-
     # def _updateContents(self, animated=False) -> None:
     #     if self._arranging:
     #         return
@@ -2997,6 +3230,7 @@ class ButtonStrip(ToolbarGraphic):
         self._arrangement.setSpacing(1)
         # self.setClipping(True)
 
+        self.geometryChanged.connect(self._updateShape)
         self.setHasHeightForWidth(True)
 
     def count(self) -> int:
@@ -3012,7 +3246,7 @@ class ButtonStrip(ToolbarGraphic):
         self.updateGeometry()
 
     def addButton(self, text: str = None, index: int = None, *,
-                  glyph: glyphs.Glyph = None,
+                  glyph: glyphs.Glyph = None, icon: QtGui.QIcon = None,
                   font_size: int = None,
                   checkable=False, checked=False, draw_check=True,
                   width: float = None, height: float = None,
@@ -3021,14 +3255,14 @@ class ButtonStrip(ToolbarGraphic):
                   name: str = None, cls: type[ButtonGraphic] = ButtonGraphic
                   ) -> ButtonGraphic:
         button = super().addButton(
-            text=text, index=index, glyph=glyph, font_size=font_size,
+            text=text, index=index, glyph=glyph, icon=icon, font_size=font_size,
             checkable=checkable, checked=checked, draw_check=draw_check,
             width=width, height=height, min_width=min_width,
             min_height=min_height, size=size, enabled=enabled, visible=visible,
-            name=name, cls=cls,
+            name=name,
         )
         button.setCornerRadius(0.0)
-        button.setGlint(False)
+        button.setFlat(True)
         button.setPillShaped(False)
         button.setHaloEnabled(False)
         button.setIntersectWithParentShape(True)
@@ -3053,6 +3287,17 @@ class ButtonStrip(ToolbarGraphic):
             button = self.itemAt(i)
             button.setText(label)
         self.updateGeometry()
+
+    def _updateShape(self) -> None:
+        rect = self.rect()
+        arng = self._arrangement
+        if not self._items:
+            return
+
+        item_rects = [r for _, r
+                      in arng.rects(Qt.PreferredSize, rect, self._items)]
+        r = util.containingRectF(item_rects)
+        self._shape = self._shapeForRect(r)
 
     # def paint(self, painter: QtGui.QPainter,
     #           option: QtWidgets.QStyleOptionGraphicsItem,
@@ -3084,7 +3329,7 @@ class MxButtonStrip(ButtonStrip):
     def addChild(self, item: ButtonGraphic, index: int = None
                  ) -> None:
         item.setCheckable(True)
-        item.setUncheckable(True)
+        item.setUncheckable(False)
         if self._current_index == -1:
             self._current_index = 0
         item.setChecked(not self._items)  # Check the first item by default
@@ -3113,6 +3358,8 @@ class MxButtonStrip(ButtonStrip):
 
     @settable()
     def setCurrentIndex(self, index: int, animated=False) -> None:
+        if index < 0:
+            raise ValueError(f"Invalid current index: {index}")
         self._current_index = index
         for i, it in enumerate(self._items):
             it.setChecked(i == index, animated=animated)
@@ -3131,72 +3378,100 @@ class MxButtonStrip(ButtonStrip):
 
 
 @graphictype("controls.transient_message")
-class TransientMessageGraphic(core.RectangleGraphic):
+class TransientMessageGraphic(core.Graphic):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
-        self._message = TextGraphic(self)
-        self._message.setLinksClickable(True)
-        self._message.setTextAlignment(Qt.AlignCenter)
-        self._message.setTextSelectable(False)
-        self._message.setExpandsHorizontally(False)
+        self._message: Optional[Graphic] = None
         self._alignment = Qt.AlignCenter
-        self._showing = True
-        self._transition_duration = core.POOF_ANIM_DURATION
+        self._showing = False
+        self._in_duration = core.ANIM_DURATION_MS
+        self._scale_curve = QtCore.QEasingCurve.OutBack
+        self._out_duration = core.ANIM_DURATION_MS * 2
+        self._out_scale_curve = QtCore.QEasingCurve.InBack
+        self._click_to_dismiss = True
+        self._auto_dismiss = False
         self._animating = False
         self._height = 0.0
 
-    @path_element(TextGraphic, "message")
+        self._timer = QtCore.QTimer()
+        self._timer.setInterval(300)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hideMessage)
+
+        self._anim_group = QtCore.QParallelAnimationGroup()
+        self._fade_anim = core.makeAnim(self, b"opacity",
+                                        curve=QtCore.QEasingCurve.Linear)
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+        self._anim_group.addAnimation(self._fade_anim)
+        self._scale_anim = core.makeAnim(self, b"scale", curve=self._scale_curve)
+        self._scale_anim.setStartValue(0.5)
+        self._scale_anim.setEndValue(1.0)
+        self._anim_group.addAnimation(self._scale_anim)
+        self._anim_group.finished.connect(self._transitionDone)
+
+        self.setZValue(100)
+
+    def _makeTextItem(self) -> None:
+        self._message = StringGraphic(self)
+        self._message.setTextAlignment(Qt.AlignCenter)
+        self._message.setPillShaped(True)
+        self._message.setFillColor(ThemeColor.success)
+        self._message.setTextColor(ThemeColor.success_fg)
+        self._message.setMargins(10, 5, 10, 5)
+
+    def resizeEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
+        self._updateContents()
+
+    @path_element(TextGraphic)
     def messageItem(self) -> TextGraphic:
         return self._message
 
-    def setMessage(self, item: Graphic) -> None:
+    @settable(argtype=Graphic)
+    def setMessageItem(self, item: Graphic) -> None:
         self.prepareGeometryChange()
         item.setParentItem(self)
         self._message = item
         self.updateGeometry()
 
-    def html(self) -> str:
-        return self.messageItem().html()
+    @settable("text")
+    def setText(self, text: str) -> None:
+        self.prepareGeometryChange()
+        if not self._message:
+            self._makeTextItem()
+        if isinstance(self._message, AbstractTextGraphic):
+            self._message.setText(text)
+        else:
+            raise ValueError(f"Can't set text on item {self._message!r}")
+        self.updateGeometry()
+
+    def isClickToDismiss(self) -> bool:
+        return self._click_to_dismiss
+
+    @settable(argtype=bool)
+    def setClickToDismiss(self, wait: bool) -> None:
+        self._click_to_dismiss = wait
+
+    def isAutoDismiss(self) -> bool:
+        return self._auto_dismiss
+
+    def setAutoDismiss(self, auto: bool) -> None:
+        self._auto_dismiss = auto
+
+    def delay(self) -> int:
+        return self._timer.interval()
 
     @settable()
-    def setHtml(self, html: str) -> None:
-        self.messageItem().setHtml(html)
-        self._updateContents()
-
-    def showMessage(self) -> None:
-        self.setMessageVisible(True)
-
-    def hideMessage(self) -> None:
-        self.setMessageVisible(False)
-
-    def isMessageVisible(self) -> bool:
-        return self._showing
-
-    def setGeometry(self, geom: QtCore.QRectF) -> None:
-        super().setGeometry(geom)
-        message = self._message
-        if self._showing:
-            msg_size = self.messageSizeForWidth(geom.width())
-            msg_pos = QtCore.QPointF((geom.width() - msg_size.width()) / 2, 0)
-            msg_rect = QtCore.QRectF(msg_pos, msg_size)
-            message.setGeometry(msg_rect)
-            radius = min(24.0, msg_rect.height() / 2)
-            message.setCornerRadius(radius)
-            message.setTransformOriginPoint(message.rect().center())
-        self._height = geom.height()
+    def setDelay(self, delay_ms: int) -> None:
+        self._timer.setInterval(delay_ms)
 
     def sizeHint(self, which: Qt.SizeHint, constraint: QtCore.QSizeF = None,
                  ) -> QtCore.QSizeF:
-        constraint = constraint or QtCore.QSizeF(-1, -1)
-        size = QtCore.QSizeF(-1, -1)
-        if which in (Qt.MinimumSize, Qt.PreferredSize):
-            if self._animating:
-                size = QtCore.QSizeF(constraint.width(), self._height)
-            w = constraint.width()
-            if self._showing and w > 0:
-                height = self.messageSizeForWidth(w).height()
-                size = QtCore.QSizeF(w, height)
-        return size
+        message = self._message
+        if message:
+            return message.sizeHint(which, constraint)
+        else:
+            return constraint
 
     def _containerHeight(self) -> float:
         return self._height
@@ -3216,48 +3491,147 @@ class TransientMessageGraphic(core.RectangleGraphic):
         size = message.sizeHint(Qt.PreferredSize, constraint)
         return size
 
-    @settable(argtype=bool)
-    def setMessageVisible(self, visible: bool):
-        duration = self._transition_duration
-        geom = self.geometry()
-        message = self.messageItem()
-        if self.animationDisabled():
-            self._message.setVisible(visible)
-        else:
-            was_showing = self._showing
-            self._showing = visible
+    def isMessageVisible(self) -> bool:
+        return self._showing
 
-            def callback():
-                self._transitionDone(visible)
+    @settable(argtype=bool)
+    def setMessageVisible(self, visible: bool, *, animated=False) -> None:
+        animated = animated and not self.animationDisabled(ignore_visible=True)
+        # geom = self.geometry()
+        if animated:
+            was_showing = self._showing
 
             if visible and not was_showing:
-                self.show()
-                h = self.messageSizeForWidth(geom.width()).height()
-                self._animating = True
-                self.animateProperty(
-                    b"containerHeight", 0.0, h,
-                    duration=duration, curve=QtCore.QEasingCurve.Linear,
-                    callback=callback
-                )
-                message.poofIn(duration=duration)
+                # h = self.messageSizeForWidth(geom.width()).height()
+                # self.animateProperty(
+                #     b"containerHeight", 0.0, h,
+                #     duration=duration, curve=QtCore.QEasingCurve.Linear,
+                #     callback=callback
+                # )
+                self._animateIn()
             elif was_showing and not visible:
-                self.show()
-                self._animating = True
-                self.animateProperty(
-                    b"containerHeight", self.size().height(), 0.0,
-                    curve=QtCore.QEasingCurve.Linear, duration=duration,
-                    callback=callback
-                )
-                message.poofOut(duration=duration)
+                # self.animateProperty(
+                #     b"containerHeight", self.size().height(), 0.0,
+                #     curve=QtCore.QEasingCurve.Linear, duration=duration,
+                #     callback=callback
+                # )
+                self._animateOut()
+        else:
+            self.setVisible(visible)
+            if visible and self.isAutoDismiss():
+                self._timer.start()
 
-    def _transitionDone(self, visible: bool) -> None:
+        self._showing = visible
+
+    def _animateIn(self) -> None:
+        self._animating = True
+        self._anim_group.setDirection(self._anim_group.Forward)
+        self._anim_group.start()
+
+    def _animateOut(self) -> None:
+        self._animating = True
+        self._anim_group.setDirection(self._anim_group.Backward)
+        self._anim_group.start()
+
+    def _transitionDone(self) -> None:
         self._animating = False
-        self.setVisible(visible)
+        if self._showing and self.isAutoDismiss():
+            self._timer.start()
 
-    def mousePressEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
-        print("CLICK!")
-        if self.isMessageVisible():
+    def hideMessage(self) -> None:
+        self.setMessageVisible(False, animated=True)
+
+    def display(self, targets: Sequence[QtWidgets.QGraphicsItem] = None,
+                click_to_dismiss: bool = None, auto_dismiss: bool = None,
+                delay: int = None, alignment=Qt.AlignCenter, margin=10,
+                animated=True) -> None:
+        if targets:
+            self.positionInside(targets, alignment=alignment, margin=margin)
+        else:
+            self.positionInViewport(alignment=alignment, margin=margin)
+        if delay is not None:
+            self.setDelay(delay)
+        if click_to_dismiss is not None:
+            self.setClickToDismiss(click_to_dismiss)
+        if auto_dismiss is not None:
+            self.setAutoDismiss(auto_dismiss)
+        self.setMessageVisible(True, animated=animated)
+
+    def positionInside(self, items: Sequence[QtWidgets.QGraphicsItem],
+                       alignment=Qt.AlignCenter, margin=10.0) -> None:
+        if not items:
+            return
+
+        first = items[0]
+        scene = first.scene()
+        if not scene:
+            raise Exception(f"{first!r} is not in a scene")
+        if scene is not self.scene():
+            raise Exception(f"Not in the same scene as {first!r}")
+
+        rect = first.mapRectToScene(first.rect())
+        for item in items[1:]:
+            rect = rect.united(item.mapRectToScene(item.rect()))
+
+        view_rect = core.sceneViewport(scene)
+        overlap = rect.intersected(view_rect)
+        if overlap.isValid():
+            area = overlap
+        else:
+            area = view_rect
+
+            # Change alignment to indicate which direction "offscreen" the
+            # selection was
+            if rect.bottom() <= area.top():
+                alignment = Qt.AlignTop
+            elif rect.top() >= area.bottom():
+                alignment = Qt.AlignBottom
+            else:
+                alignment = Qt.AlignVCenter
+
+            if rect.right() <= area.left():
+                alignment |= Qt.AlignLeft
+            elif rect.left() >= area.right():
+                alignment |= Qt.AlignRight
+            else:
+                alignment |= Qt.AlignHCenter
+
+        self.positionInSceneRect(area, alignment=alignment, margin=margin)
+
+    def positionInViewport(self, alignment=Qt.AlignCenter, margin=10.0) -> None:
+        scene = self.scene()
+        if not scene:
+            raise Exception(f"{self!r} is not in a scene")
+        area = core.sceneViewport(scene)
+        self.positionInSceneRect(area, alignment=alignment, margin=margin)
+
+    def positionInSceneRect(self, scene_rect: QtCore.QRectF,
+                            alignment=Qt.AlignCenter, margin=10.0) -> None:
+        message = self._message
+        inset_rect = scene_rect.adjusted(margin, margin, -margin, -margin)
+        if inset_rect.isValid():
+            scene_rect = inset_rect
+        if message.hasImplicitSize():
+            size = message.implicitSize()
+        else:
+            size = self._message.effectiveSizeHint(Qt.PreferredSize,
+                                                   scene_rect.size())
+        rect = util.alignedRectF(self.layoutDirection(), alignment, size,
+                                 scene_rect)
+        self.setGeometry(rect)
+
+    def mousePressEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent
+                        ) -> None:
+        if self.isClickToDismiss() and self.isMessageVisible():
             self.hideMessage()
+
+    def _updateContents(self) -> None:
+        rect = self.rect()
+        message = self._message
+        if message:
+            message.setGeometry(rect)
+        self._height = rect.height()
+        self.setTransformOriginPoint(rect.center())
 
     # def paint(self, painter: QtGui.QPainter,
     #           option: QtWidgets.QStyleOptionGraphicsItem,
@@ -3288,8 +3662,8 @@ class TabDotsGraphic(core.ClickableGraphic):
 
     _dot_color = DynamicColor()
 
-    @path_element(core.RectangleGraphic, "dot")
-    def dotItem(self) -> core.RectangleGraphic:
+    @path_element(core.RectangleGraphic)
+    def dot(self) -> core.RectangleGraphic:
         return self._dot
 
     def onMousePress(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
@@ -3462,87 +3836,6 @@ class TabDotsGraphic(core.ClickableGraphic):
                 painter.drawRoundedRect(rect, radius, radius)
             else:
                 painter.drawRect(rect)
-
-
-@graphictype("containers.roll_up")
-class RollUpGraphic(Graphic):
-    openStateChanged = QtCore.Signal()
-
-    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
-        super().__init__(parent=parent)
-        self._content_height = 0.0
-        self._revealed: float = 1.0
-        self._is_open = True
-        self.setClipping(True)
-        self._content: Optional[Graphic] = None
-
-        self.geometryChanged.connect(self._updateContents)
-
-    @settable(value_object_type=Graphic)
-    def setContentItem(self, content: Graphic):
-        self.prepareGeometryChange()
-        content.setParentItem(self)
-        self._content = content
-        self._updateContents()
-        self.updateGeometry()
-
-    def revealedFraction(self) -> float:
-        return self._revealed
-
-    def setRevealedFraction(self, revealed: float) -> None:
-        self._revealed = revealed
-        self.updateGeometry()
-        self._updateContents()
-
-    revealed = QtCore.Property(float, revealedFraction, setRevealedFraction)
-
-    def sizeHint(self, which: Qt.SizeHint, constraint: QtCore.QSizeF = None
-                 ) -> QtCore.QSizeF:
-        content = self._content
-        if not content:
-            return constraint
-
-        if which == Qt.MinimumSize:
-            return QtCore.QSizeF(constraint.width(), 0)
-        elif which == Qt.PreferredSize or which == Qt.MaximumSize:
-            size = content.effectiveSizeHint(which, constraint)
-            if which == Qt.PreferredSize:
-                height = size.height()
-                self._content_height = height
-                if 0.0 <= self._revealed <= 1.0:
-                    height *= self._revealed
-                size.setHeight(height)
-            return size
-        else:
-            return constraint
-
-    def toggle(self, animated=False) -> None:
-        self.setOpen(not self.isOpen(), animated=animated)
-
-    def isOpen(self) -> bool:
-        return self._is_open
-
-    @settable(argtype=bool)
-    def setOpen(self, open: bool, animated=True) -> None:
-        self._is_open = open
-        revealed = float(open)
-        if animated:
-            self.animateProperty(b"revealed", self._revealed, revealed)
-        else:
-            self.setRevealedFraction(revealed)
-        self.openStateChanged.emit()
-
-    def _updateContents(self):
-        content = self._content
-        if not content:
-            return
-
-        height = self._content_height
-        hidden_fraction = 1.0 - max(0.0, min(1.0, self._revealed))
-        crect = self.rect()
-        r = QtCore.QRectF(crect.x(), crect.y() - height * hidden_fraction,
-                          crect.width(), height)
-        content.setGeometry(r)
 
 
 @graphictype("controls.tones")

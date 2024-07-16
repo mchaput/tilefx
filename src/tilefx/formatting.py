@@ -4,7 +4,6 @@ from __future__ import annotations
 import dataclasses
 import enum
 import math
-import pathlib
 import re
 from datetime import datetime, timedelta
 from typing import (cast, Any, Callable, Dict, Literal, Sequence, Tuple,
@@ -18,14 +17,15 @@ alnum_expr = re.compile(r"\d+([.]\d+)?|\w+")
 TierList = Sequence[Tuple[int, str]]
 
 formatter_class_registery: Dict[str, Type[NumberFormatter]] = {}
-formattertype = registrar(formatter_class_registery)
+formattertype = registrar(formatter_class_registery, compile_setters=True)
 
 NEGATIVE_CHAR = "-"
 # NEGATIVE_CHAR = "\u2212"
-LIGHT_WEIGHT = 100
+LIGHT_WEIGHT = 200
 NORMAL_WEIGHT = 400
 BOLD_WEIGHT = 700
 
+ABBR_WEIGHT = NORMAL_WEIGHT
 WHOLE_WEIGHT = NORMAL_WEIGHT
 FRACTION_WEIGHT = LIGHT_WEIGHT
 
@@ -73,7 +73,7 @@ class FormattedNumber(FormattedValue):
         return self.original < 0
 
     def plainText(self) -> str:
-        return "".join((self.prefix, self.text, self.fraction, self.suffix))
+        return f"{self.prefix}{self.text}{self.fraction} {self.suffix}"
 
     def html(self) -> str:
         ww = self.whole_weight
@@ -100,24 +100,41 @@ class FormattedDuration(FormattedNumber):
     fraction_weight: int = WHOLE_WEIGHT
     decimal_places: int = 1
     auto_decimal: int = 1
+    hms: bool = False
     long: bool = False
 
     def __str__(self) -> str:
         return self.plainText()
 
     def plainText(self) -> str:
-        return format_duration(self.original, markup=False,
-                               decimal_places=self.decimal_places,
-                               auto_decimal=self.auto_decimal,
-                               long=self.long)
+        if self.hms:
+            return format_hms(self.original, markup=False,
+                              decimal_places=self.decimal_places,
+                              auto_decimal=self.auto_decimal,
+                              whole_weight=self.whole_weight,
+                              fraction_weight=self.fraction_weight)
+        else:
+            return format_duration(self.original, markup=False,
+                                   decimal_places=self.decimal_places,
+                                   auto_decimal=self.auto_decimal,
+                                   long=self.long,
+                                   whole_weight=self.whole_weight,
+                                   fraction_weight=self.fraction_weight)
 
     def html(self) -> str:
-        return format_duration(self.original, markup=True,
-                               decimal_places=self.decimal_places,
-                               auto_decimal=self.auto_decimal,
-                               whole_weight=self.whole_weight,
-                               fraction_weight=self.fraction_weight,
-                               long=self.long)
+        if self.hms:
+            return format_hms(self.original, markup=True,
+                              decimal_places=self.decimal_places,
+                              auto_decimal=self.auto_decimal,
+                              whole_weight=self.whole_weight,
+                              fraction_weight=self.fraction_weight)
+        else:
+            return format_duration(self.original, markup=True,
+                                   decimal_places=self.decimal_places,
+                                   auto_decimal=self.auto_decimal,
+                                   whole_weight=self.whole_weight,
+                                   fraction_weight=self.fraction_weight,
+                                   long=self.long)
 
 
 # These must be in reverse order of magnitude
@@ -127,16 +144,18 @@ NUMBER_TIERS: TierList = (
     (1000 ** 1, "K")
 )
 MEMORY_TIERS: TierList = (
-    (1024 ** 4, "TiB"),
-    (1024 ** 3, "GiB"),
-    (1024 ** 2, "MiB"),
-    (1024 ** 1, "KiB")
+    (1024 ** 4, "TB"),
+    (1024 ** 3, "GB"),
+    (1024 ** 2, "MB"),
+    (1024 ** 1, "KB"),
+    (1024 ** 0, "bytes"),
 )
 DISK_TIERS: TierList = (
     (1000 ** 4, "TB"),
     (1000 ** 3, "GB"),
     (1000 ** 2, "MB"),
-    (1000 ** 1, "KB")
+    (1000 ** 1, "KB"),
+    (1000 ** 0, "bytes")
 )
 
 
@@ -178,15 +197,14 @@ class NumberFormatter:
         self._places = decimal_places
         self._auto_decimal = auto_decimal
         self._briefmode = brief_mode
-        self._briefcut = 10000
+        self._briefcut = 0
         self._tiers = tiers
         self._whole_weight = WHOLE_WEIGHT
         self._fraction_weight = WHOLE_WEIGHT
 
     @classmethod
     def fromData(cls, typename: str, data: Dict[str, Any]) -> NumberFormatter:
-        obj: NumberFormatter = cls()
-
+        obj = cls()
         briefmode = BriefMode.never
         tiers = NUMBER_TIERS
         if typename == "brief":
@@ -241,12 +259,14 @@ class NumberFormatter:
     def wholeWeight(self) -> int:
         return self._whole_weight
 
+    @settable()
     def setWholeWeight(self, weight: int | str):
         self._whole_weight = weight
 
     def fractionWeight(self) -> int:
         return self._fraction_weight
 
+    @settable()
     def setFractionWeight(self, weight: int | str):
         self._fraction_weight = weight
 
@@ -255,7 +275,8 @@ class NumberFormatter:
         # After formatting replace hyphen with actual unicode minus sign
         text = f"{value:,d}".replace("-", NEGATIVE_CHAR)
         return FormattedNumber(value, text, type=NumberType.integer,
-                               brief=is_brief, whole_weight=self._whole_weight)
+                               brief=is_brief, whole_weight=self._whole_weight,
+                               fraction_weight=self._fraction_weight)
 
     def formatFloat(self, value: float, avail_digits: int, places: int,
                     is_brief=False) -> FormattedNumber:
@@ -404,23 +425,32 @@ class DurationFormatter(NumberFormatter):
     def __init__(self, decimal_places=1, auto_decimal=1, long=False):
         super().__init__(decimal_places=decimal_places,
                          auto_decimal=auto_decimal)
+        self._hms = False
         self._long = long
 
-    @settable("long")
-    def setUseLongFormat(self, long: bool):
-        self._long = long
+    def usingHmsStyle(self) -> bool:
+        return self._hms
+
+    @settable("hms")
+    def setUseHmsStyle(self, hms: bool) -> None:
+        self._hms = hms
 
     def usingLongFormat(self) -> bool:
         return self._long
 
+    @settable("long", argtype=bool)
+    def setUseLongFormat(self, long: bool):
+        self._long = long
+
     def formatNumber(self, value: Union[int, float], avail_digits: int = None,
                      places: int = None, is_brief=False) -> FormattedNumber:
-        return FormattedDuration(value, "",
-                                 decimal_places=self.decimalPlaces(),
-                                 auto_decimal=self.autoDecimalPlaces(),
-                                 long=self._long,
-                                 whole_weight=self._whole_weight,
-                                 fraction_weight=self._fraction_weight)
+        return FormattedDuration(
+            value, "", hms=self.usingHmsStyle(),
+            decimal_places=self.decimalPlaces(),
+            auto_decimal=self.autoDecimalPlaces(), long=self._long,
+            whole_weight=self._whole_weight,
+            fraction_weight=self._fraction_weight
+        )
 
 
 def formatted_number(value: [Union[str, int, float]], brief=False,
@@ -440,13 +470,54 @@ def format_number(value: [Union[int, float]], brief=False, markup=False) -> str:
         return fmt.plainText()
 
 
+def format_hms(secs: float, markup=True, decimal_places=0, auto_decimal=1,
+               less_than_1_ms=False,
+               whole_weight=WHOLE_WEIGHT, fraction_weight=FRACTION_WEIGHT
+               ) -> str:
+    if less_than_1_ms and secs < 0.001:
+        return "&lt; 1ms" if markup else "< 1ms"
+
+    if secs < 0.1:
+        msec = round(secs * 1000.0, auto_decimal)
+        if msec.is_integer():
+            msec = int(msec)
+        suffix = abbr('ms') if markup else "ms"
+        return f"{msec}{suffix}"
+
+    secs = round(secs, decimal_places)
+    if isinstance(secs, float) and secs.is_integer():
+        secs = int(secs)
+
+    parts: list[tuple[float, str]] = []
+    hours, mins, secs = divide_seconds(secs)
+    secs = round(secs, decimal_places)
+    if hours:
+        parts.append((hours, "h"))
+    if mins or hours:
+        parts.append((mins, "m"))
+    parts.append((secs, "s"))
+
+    if markup:
+        return " ".join(
+            markup_float(v, whole_weight=whole_weight,
+                         fraction_weight=fraction_weight) + abbr(unit)
+            for v, unit in parts
+        )
+    else:
+        return " ".join(f"{v}{unit}" for v, unit in parts)
+
+
 def format_duration(secs: float, markup=True, decimal_places=1, long=False,
                     auto_decimal=1, whole_weight=WHOLE_WEIGHT,
                     fraction_weight=FRACTION_WEIGHT) -> str:
-    if decimal_places == 0 and auto_decimal and 0 < secs < 1.0:
-        decimal_places = auto_decimal
-    secs = round(secs, decimal_places)
+    if secs < 0.001:
+        return "&lt; 1ms" if markup else "< 1ms"
+    elif secs < 0.1:
+        msec = int(round(secs * 1000))
+        suffix = abbr('ms') if markup else "ms"
+        return f"{msec}{suffix}"
 
+    secs = round(secs, decimal_places)
     hours, mins, secs = divide_seconds(secs)
     if isinstance(secs, float) and secs.is_integer():
         secs = int(secs)
@@ -518,7 +589,7 @@ def span(string: str, weight=NORMAL_WEIGHT) -> str:
     return f"<span style='font-weight: {weight}'>{string}</span>"
 
 
-def abbr(string: str, size="0.8em", weight=LIGHT_WEIGHT) -> str:
+def abbr(string: str, size="0.8em", weight=ABBR_WEIGHT) -> str:
     return f"<span style='font-weight: {weight}'>{string}</span>"
 
 

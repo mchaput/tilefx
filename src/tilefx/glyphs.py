@@ -135,7 +135,9 @@ def forName(name: str) -> Glyph:
     else:
         family = DEFAULT_FAMILY
 
-    if family == "font_awesome" or family == "font_awesome.outlined":
+    if family == "iconfx":
+        glyph_type = IconFX
+    elif family == "font_awesome" or family == "font_awesome.outlined":
         glyph_type = FontAwesome
     # elif family == "font_awesome.solid":
     #     glyph_type = FontAwesomeSolid
@@ -150,12 +152,53 @@ def forName(name: str) -> Glyph:
 
 
 class Glyph(enum.Enum):
+    @classmethod
     def familyAndWeight(self, variant: str = None) -> tuple[str, Optional[int]]:
         raise NotImplementedError
 
 
-class MaterialIcons(Glyph):
+class IconFX(Glyph):
+    @classmethod
     def familyAndWeight(self, variant: str = None) -> tuple[str, Optional[int]]:
+        return "IconFX", None
+
+    add = 0xe951
+    attribute = 0xe952
+    attribute_face = 0xe953
+    attribute_object = 0xe954
+    attribute_point = 0xe955
+    attribute_vertex = 0xe956
+    bounds = 0xe957
+    color = 0xe958
+    color_grab = 0xe959
+    delete = 0x2421
+    delete_face = 0xe95a
+    dict = 0xe95b
+    error = 0xe95c
+    info = 0xe95d
+    object = 0xe95e
+    point = 0xe95f
+    polygon_face = 0xe960
+    polygon_normal = 0xe961
+    pose = 0xe962
+    pose_t = 0xe963
+    position = 0xe964
+    select_face = 0xe965
+    select_object = 0xe966
+    string = 0xe967
+    surface = 0xe968
+    texture = 0xe969
+    vector = 0xe96a
+    vertex = 0xe96b
+    view_wireframe = 0xe96c
+    volume_dense = 0xe96d
+    volume_vdb = 0xe96e
+    warning = 0x26a0
+
+
+class MaterialIcons(Glyph):
+    @classmethod
+    def familyAndWeight(cls, variant: str = None) -> tuple[str, Optional[int]]:
         if variant == "solid":
             return "Material Icons", None
         else:
@@ -2402,6 +2445,7 @@ class MaterialIcons(Glyph):
 
 
 class FontAwesome(Glyph):
+    @classmethod
     def familyAndWeight(self, variant: str = None) -> tuple[str, Optional[int]]:
         if variant == "outlined":
             return "Font Awesome 6 Free", 400

@@ -2,7 +2,7 @@ from __future__ import annotations
 import pathlib
 import time
 from collections import defaultdict
-from typing import (Any, Callable, Collection, Iterable,
+from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable,
                     Optional, Sequence, TypeVar, Union)
 
 from PySide2 import QtCore, QtGui, QtWidgets
@@ -10,6 +10,9 @@ from PySide2.QtCore import Qt
 
 from .. import colorutils, config, converters, models, themes, util
 from ..config import settable
+
+if TYPE_CHECKING:
+    from . import controls
 
 
 ANIM_DURATION_MS = 250
@@ -31,9 +34,12 @@ AT = TypeVar("AT")
 
 # Maps Graphic type names (as specified in the JSON) to classes
 graphic_class_registry: dict[str, type[Graphic]] = {}
-# Maps each Graphic subclass to a dict mapping "path
-# element" names to tuples of (method, return_type)
-path_element_lookup: dict[type[Graphic], dict[str, tuple[Callable, type]]] = {}
+
+
+# def dump(obj: QtWidgets.QGraphicsItem, tab=0) -> None:
+#     print("  " * tab, type(obj), obj.objectName())
+#     for sub in obj.childItems():
+#         dump(sub, tab + 1)
 
 
 def graphictype(*names):
@@ -43,20 +49,16 @@ def graphictype(*names):
                 raise Exception(f"Duplicate graphic type name: {name}")
             graphic_class_registry[name] = cls
         cls.graphic_type_names = names
+        config.compileSettables(cls)
         return cls
     return fn
 
 
-def path_element(argtype: type[Graphic], name: str = None):
+def path_element(argtype: type[Graphic]):
     def fn(method: T) -> T:
-        method._path_element = (name or method.__name__, argtype)
+        method._element_type = argtype
         return method
     return fn
-
-
-outback = QtCore.QEasingCurve(QtCore.QEasingCurve.BezierSpline)
-outback.addCubicBezierSegment(QtCore.QPointF(.17,.67), QtCore.QPointF(.43,1.3),
-                              QtCore.QPointF(1.0, 1.0))
 
 
 def makeProxyItem(parent: QtWidgets.QGraphicsItem, widget: QtWidgets.QWidget
@@ -154,6 +156,45 @@ def dataProxyFor(obj: QtCore.QObject) -> QtCore.QObject:
     return checked[-1]
 
 
+def copyTextToClipboard(text: str) -> None:
+    if text:
+        clipboard = QtGui.QGuiApplication.clipboard()
+        clipboard.setText(text)
+
+
+def sceneViewport(scene: QtWidgets.QGraphicsScene) -> QtCore.QRectF:
+    from .widgets import GraphicView
+
+    for view in scene.views():
+        if isinstance(view, GraphicView):
+            return view.viewportRect()
+
+    return scene.sceneRect()
+
+
+def copyItemContentsToClipboard(items: Sequence[Graphic], text: str = None,
+                                scene: QtWidgets.QGraphicsScene = None,
+                                deselect=True) -> None:
+    if items:
+        scene = scene or items[0].scene()
+        if text is None:
+            text = "; ".join(item.textToCopy() for item in items)
+    if not text:
+        return
+
+    if deselect:
+        for item in items:
+            item.setSelected(False)
+
+    if scene and isinstance(scene, GraphicScene):
+        scene.displayMessage(
+            "Copied to Clipboard", targets=items, click_to_dismiss=False,
+            auto_dismiss=True, delay=600, animated=True,
+        )
+
+    copyTextToClipboard(text)
+
+
 class GraphicScene(QtWidgets.QGraphicsScene):
     viewportChanged = QtCore.Signal()
     rootChanged = QtCore.Signal()
@@ -167,19 +208,37 @@ class GraphicScene(QtWidgets.QGraphicsScene):
         self._template_data: dict[str, Any] = {}
         self._root: Optional[Graphic] = None
         self._controller: Optional[config.DataController] = None
+        self._message: Optional[controls.TransientMessageGraphic] = None
 
         # c = QtGui.QColor("#63D0DF")  # "#63D0DF" #D0BCFF
         theme_hct = colorutils.Color("hct", [282, 48, 25])
         highlight_hct = themes.qcolor_to_hct(QtGui.QColor("#C7FF00"))
-        self._color_theme = themes.ColorTheme.fromHct(
-            theme_hct, highlight_hct=highlight_hct
-        )
+        self._color_theme = themes.ColorTheme.fromHct(theme_hct)
         self._theme_palette = self._color_theme.themePalette()
         self.setPalette(self._theme_palette.qtPalette())
 
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.matches(QtGui.QKeySequence.Copy):
+            focus_item = self.focusItem()
+            selected = self.selectedItems()
+
+            if focus_item and isinstance(focus_item, QtWidgets.QGraphicsTextItem):
+                # A QGraphicsTextItem can take care of copying its own selection
+                # to the clipboard, we should just fall through to the super()
+                # call below
+                pass
+            elif selected:
+                event.accept()
+                copyItemContentsToClipboard(selected, scene=self)
+                return
+
+        super().keyPressEvent(event)
+
     def contextMenuEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
-        print("event=", event)
-        # event.accept()
+        # Implement scene-level context menu here someday.
+        # (We must accept this event because if it propagates down to Qt code
+        # it will crash trying to open a standard context menu.)
+        event.accept()
 
     def linkClicked(self, url: str) -> None:
         # print("link clicked=", url)
@@ -258,6 +317,32 @@ class GraphicScene(QtWidgets.QGraphicsScene):
     def setAnimationDisabled(self, disabled: bool) -> None:
         self._animation_disabled = disabled
 
+    def viewportRect(self) -> QtCore.QRectF:
+        return sceneViewport(self)
+
+    def _makeMessage(self) -> None:
+        from .controls import TransientMessageGraphic
+        self._message = TransientMessageGraphic()
+        self.addItem(self._message)
+        self._message.setGeometry(10, 10, 128, 128)
+        self._message.setText("Hello there I am a message")
+
+    def messageItem(self) -> controls.TransientMessageGraphic:
+        if not self._message:
+            self._makeMessage()
+        return self._message
+
+    def displayMessage(self, text: str,
+                       targets: Sequence[QtWidgets.QGraphicsItem] = None,
+                       click_to_dismiss=False, auto_dismiss=True, delay=500,
+                       alignment=Qt.AlignCenter, margin=10, animated=True
+                       ) -> None:
+        message = self.messageItem()
+        message.setText(text)
+        message.display(targets=targets, click_to_dismiss=click_to_dismiss,
+                        auto_dismiss=auto_dismiss, delay=delay,
+                        alignment=alignment, margin=margin, animated=animated)
+
 
 class DynamicColor:
     # Descriptor that calculates a color on-demand based on the current theme.
@@ -315,6 +400,8 @@ class Graphic(QtWidgets.QGraphicsWidget):
 
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
+        self._children: dict[Union[int, str], Graphic] = {}
+        self._styles: Optional[dict[str, Any]] = None
         self._implicit_size: Optional[QtCore.QSizeF] = None
         self._fixed_width: Optional[float] = None
         self._fixed_height: Optional[float] = None
@@ -324,7 +411,6 @@ class Graphic(QtWidgets.QGraphicsWidget):
         self._anims: dict[bytes, QtCore.QPropertyAnimation] = {}
         self._callbacks: dict[int, Callable[[], None]] = {}
         self._model: Optional[QtCore.QAbstractItemModel] = None
-        self._animation_disabled = False
         self._fading_out = False
         self._fading_in = False
         self._xrot = 0.0
@@ -340,8 +426,9 @@ class Graphic(QtWidgets.QGraphicsWidget):
         font.setPixelSize(12)
         super().setFont(font)
 
-    def contextMenuEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
-        print("Graphic context menu=", event)
+    # def contextMenuEvent(self, event: QtWidgets.QGraphicsSceneEvent) -> None:
+    #     print("Graphic context menu=", event)
+    #     event.accept()
 
     @classmethod
     def propertyAliases(cls) -> dict[str, str]:
@@ -367,15 +454,14 @@ class Graphic(QtWidgets.QGraphicsWidget):
         return ()
 
     @classmethod
-    def objectValueKeysAndTypes(
-            cls) -> Sequence[tuple[str, Optional[type[QtCore.QObject]]]]:
-        return [(key, info.value_object_type)
-                for key, info in config.setterInfos(cls).items()
+    def objectValueKeysAndTypes(cls) -> Sequence[tuple[str, type[QtCore.QObject]]]:
+        return [(info.name, info.value_object_type)
+                for _, info in config.settersAndInfos(cls)
                 if info.value_object_type]
 
     @classmethod
     def parentMethodKeys(cls) -> Collection[str]:
-        return [key for key, info in config.setterInfos(cls).items()
+        return [info.name for _, info in config.settersAndInfos(cls)
                 if info.is_parent_method]
 
     def configureFromData(self, data: dict[str, Any],
@@ -388,18 +474,16 @@ class Graphic(QtWidgets.QGraphicsWidget):
         # Pull out properties that are graphic items, so we can instantiate them
         # separately and make the controller aware of them
         key_type_data_list: \
-            list[tuple[str, Optional[QtCore.QObject], dict[str, Any]]] = []
+            list[tuple[str, type[QtCore.QObject], dict[str, Any]]] = []
         for k, ktype in self.objectValueKeysAndTypes():
             if k in data:
                 key_type_data_list.append((k, ktype, data.pop(k)))
 
-        if "name" in data:
-            self.setObjectName(data.pop("name"))
-        if controller:
-            controller.prepObject(self, data)
-        config.updateSettables(self, data)
+        name = data.pop("name", None)
+        if name:
+            self.setObjectName(name)
 
-        # For each property that take an item type (such as a model or a
+        # For each property that takes an item type (such as a model or a
         # Graphic), instantiate the object from the JSON value and then pass it
         # to the setter
         for key, obj_type, sub_data in key_type_data_list:
@@ -416,6 +500,10 @@ class Graphic(QtWidgets.QGraphicsWidget):
                 raise TypeError(f"Can't make value of type {obj_type}")
             config.setSettable(self, key, c)
 
+        if controller:
+            controller.prepObject(self, data, name)
+        config.updateSettables(self, data)
+
         # Create child items
         for sub_data in child_datas:
             c = graphicFromData(sub_data, parent=self, controller=controller)
@@ -423,6 +511,13 @@ class Graphic(QtWidgets.QGraphicsWidget):
 
     def model(self) -> QtCore.QAbstractItemModel:
         return self._model
+
+    def textToCopy(self) -> str:
+        return ""
+
+    def sceneChanged(self, old_scene: QtWidgets.QGraphicsScene,
+                     new_scene: QtWidgets.QGraphicsScene) -> None:
+        pass
 
     def viewportChanged(self) -> None:
         pass
@@ -480,26 +575,14 @@ class Graphic(QtWidgets.QGraphicsWidget):
         self._theme_palette = theme.themePalette()
         self.setPalette(self._theme_palette.qtPalette())
 
-    @staticmethod
-    def _findPathElements(cls: type[Graphic]) -> None:
-        d: dict[str, tuple[Callable, type]] = {}
-        for name in dir(cls):
-            m = getattr(cls, name)
-            if hasattr(m, "_path_element"):
-                name, argtype = getattr(m, "_path_element")
-                d[name] = (m, argtype)
-        path_element_lookup[cls] = d
-
     def pathElement(self, name: str) -> Optional[QtCore.QObject]:
-        for cls in type(self).__mro__:
-            if cls not in path_element_lookup:
-                self._findPathElements(cls)
-            lookup = path_element_lookup[cls]
-            if name in lookup:
-                return lookup[name][0](self)
+        return getattr(self, name)()
 
     def addChild(self, item: QtWidgets.QGraphicsItem) -> None:
         item.setParentItem(self)
+        name = item.objectName()
+        key = name if name else id(item)
+        self._children[key] = item
 
     def prepChild(self, child: Graphic, data: dict[str, Any]) -> None:
         # Child items can have settings that are meant to be interpreted by the
@@ -510,24 +593,27 @@ class Graphic(QtWidgets.QGraphicsWidget):
         if self.graphic_type_names:
             for prop_name in parent_keys:
                 if prop_name in data:
-                    setter = config.findParentSettable(self, prop_name)
-                    if setter:
+                    if setter := config.findParentSettable(self, prop_name):
                         value = data.pop(prop_name)
                         setter(self, child, value)
                     else:
                         raise NameError(f"No property {prop_name} on {self!r}")
 
-    def findChildGraphic(self, name: str, recursive=False,
-                         ) -> Optional[QtWidgets.QGraphicsWidget]:
-        for child in self.childItems():
-            if not isinstance(child, QtWidgets.QGraphicsWidget):
-                continue
+    def findElement(self, name: str, recursive=False,
+                    ) -> Optional[QtWidgets.QGraphicsWidget]:
+        try:
+            return self._children[name]
+        except KeyError:
+            pass
 
-            if child.objectName() == name:
-                return child
+        try:
+            return self.pathElement(name)
+        except AttributeError:
+            pass
 
-            if recursive and isinstance(child, Graphic):
-                obj = child.findChildGraphic(name, recursive)
+        if recursive:
+            for child in self.childGraphics():
+                obj = child.findElement(name, recursive)
                 if obj:
                     return obj
 
@@ -535,7 +621,6 @@ class Graphic(QtWidgets.QGraphicsWidget):
         return [c.objectName() for c in self.childItems() if c.objectName()]
 
     def parentViewportRect(self) -> QtCore.QRectF:
-        from .widgets import GraphicView
         # This must return the visible rect in SCENE coordinates
         parent = self.parentGraphic()
         if parent:
@@ -543,14 +628,9 @@ class Graphic(QtWidgets.QGraphicsWidget):
         else:
             scene = self.scene()
             if scene:
-                for view in scene.views():
-                    if isinstance(view, GraphicView):
-                        return view.viewportRect()
-                    else:
-                        return view.sceneRect()
-                else:
-                    return scene.sceneRect()
-            return QtCore.QRectF()
+                return sceneViewport(scene)
+            else:
+                return QtCore.QRectF()
 
     def viewportRect(self) -> QtCore.QRectF:
         # This must return the visible rect in SCENE coordinates
@@ -577,6 +657,47 @@ class Graphic(QtWidgets.QGraphicsWidget):
             layout.setSpacing(0)
             self.setLayout(layout)
         return layout
+
+    def namedStyle(self, name: str) -> dict[str, Any]:
+        name = name or "*"
+        style = self._styles.get(name, {}) if self._styles else {}
+        if parent := self.parentGraphic():
+            style = parent.namedStyle(name) | style
+        return style
+
+    @settable("style")
+    def setStyleName(self, stylename: str) -> None:
+        style = self.namedStyle(stylename)
+        if style:
+            config.updateSettables(self, style)
+
+    @settable()
+    def setStyles(self, styles: dict[str, dict[str, Any]]) -> None:
+        self._styles = styles
+
+    def canShrink(self) -> Optional[bool]:
+        return None
+
+    def findShrinkables(self) -> Iterable[Graphic]:
+        shrinkable = self.canShrink()
+        if shrinkable is None:
+            for child in self.childGraphics():
+                yield from child.findShrinkables()
+        elif shrinkable:
+            yield self
+
+    def shrinkHeightTo(self, height: float) -> None:
+        raise NotImplementedError(type(self))
+
+    def shrinkFactor(self) -> float:
+        return 1.0
+
+    def shrunkenMinimumHeight(self) -> float:
+        return self.minimumHeight()
+
+    def unshrink(self) -> None:
+        for tile in self.childGraphics():
+            tile.unshrink()
 
     @settable()
     def setSelectable(self, on: bool) -> None:
@@ -636,11 +757,10 @@ class Graphic(QtWidgets.QGraphicsWidget):
     def updateableChildren(self) -> Iterable[Graphic]:
         return self.childGraphics()
 
-    def animationDisabled(self) -> bool:
-        return not self.isVisible() or sceneAnimationDisabled(self.scene())
-
-    def setAnimationDisabled(self, disabled: bool) -> None:
-        self._animation_disabled = disabled
+    def animationDisabled(self, ignore_visible=False) -> bool:
+        if not (self.isVisible() or ignore_visible):
+            return True
+        return sceneAnimationDisabled(self.scene())
 
     def clipping(self) -> bool:
         return self.flags() & self.ItemClipsChildrenToShape
@@ -912,6 +1032,16 @@ class Graphic(QtWidgets.QGraphicsWidget):
         else:
             self._setHiliteVal(value)
 
+    def _selectionPenAndBrush(self) -> tuple[QtGui.QPen, QtGui.QBrush]:
+        palette = self.themePalette()
+        outline = palette.resolve(themes.ThemeColor.highlight)
+        outline.setAlphaF(0.5)
+        fill = palette.resolve(themes.ThemeColor.highlight_surface)
+        fill.setAlphaF(0.25)
+        pen = QtGui.QPen(outline, 1.0)
+        brush = QtGui.QBrush(fill)
+        return pen, brush
+
 
 settable()(Graphic.setToolTip)
 
@@ -1028,6 +1158,7 @@ class DataGraphic(Graphic):
         if self._model:
             self._disconnectModel()
         self._model = model
+        self.setLocalVariable("model", model)
         if self._model:
             self._connectModel()
 
@@ -1226,12 +1357,12 @@ class AreaGraphic(Graphic):
 
     fill = QtCore.Property(QtGui.QColor, fillColor, setFillColor)
 
-    @settable("bg_tint", argtype=QtGui.QColor)
+    @settable("fill_tint", argtype=QtGui.QColor)
     def setFillTintColor(self, color: QtGui.QColor) -> None:
         self._fill_tint = color
         self.update()
 
-    @settable("bg_tint_amount")
+    @settable("fill_tint_amount")
     def setFillTintAmount(self, amount: float) -> None:
         self._fill_tint_amount = amount
         self.update()
@@ -1371,10 +1502,18 @@ class RectangleGraphic(AreaGraphic):
             else:
                 painter.drawRect(rect)
 
+    def _paintSelection(self, painter: QtGui.QPainter) -> None:
+        pen, brush = self._selectionPenAndBrush()
+        painter.setPen(pen)
+        painter.setBrush(brush)
+        painter.drawPath(self.shape())
+
     def paint(self, painter: QtGui.QPainter,
               option: QtWidgets.QStyleOptionGraphicsItem,
               widget: Optional[QtWidgets.QWidget] = None) -> None:
         self._paintRectangle(painter)
+        if self.isSelected():
+            self._paintSelection(painter)
 
 
 class ClickableGraphic(RectangleGraphic):
@@ -1623,8 +1762,28 @@ class FieldAdapter:
         return r
 
 
+class ItemGraphic(RectangleGraphic):
+    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
+        super().__init__(parent)
+        self._copyable_text_expr: Optional[config.PythonExpr] = None
+
+    @settable("copyable_text")
+    def setCopyableTextExpression(self, expr: config.PythonExpr) -> None:
+        if isinstance(expr, (str, dict)):
+            expr = config.PythonExpr.fromData(expr)
+        self._copyable_text_expr = expr
+
+    def textToCopy(self) -> str:
+        if self._copyable_text_expr:
+            text = self._evaluateExpr(self._copyable_text_expr)
+            print("copy=", repr(text))
+            return text
+        else:
+            return ""
+
+
 @graphictype("field")
-class FieldGraphic(RectangleGraphic):
+class FieldGraphic(ItemGraphic):
     _anchor_to_name = util.invertedDict(converters.anchor_points)
 
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
@@ -1790,7 +1949,7 @@ class FieldGraphic(RectangleGraphic):
 
 
 @graphictype("anchors")
-class AnchorsGraphic(RectangleGraphic):
+class AnchorsGraphic(ItemGraphic):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
         self._layout_ops: defaultdict[str, list[tuple]] = defaultdict(list)
@@ -1830,7 +1989,7 @@ class AnchorsGraphic(RectangleGraphic):
                         ) -> Optional[QtWidgets.QGraphicsLayoutItem]:
         if name == "parent":
             return self.layout()
-        return self.findChildGraphic(name)
+        return self.findElement(name)
 
     @settable("spacing")
     def setLayoutSpacing(self, spacing: float) -> None:

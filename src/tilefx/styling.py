@@ -8,6 +8,18 @@ from PySide2.QtCore import Qt
 from . import converters
 
 
+class TextSize(enum.IntEnum):
+    small_label = 10
+    label = 12
+    tiny = 9
+    xsmall = 10
+    small = 12
+    medium = 13
+    large = 16
+    xlarge = 20
+    huge = 28
+
+
 TONE_LIGHTNESS = (1.0, 0.6, 0.8, 0.4, 0.2, 0.9, 0.7, 0.5, 0.3)
 
 _icon_cache: dict[tuple[str, int, str], QtGui.QPixmap] = {}

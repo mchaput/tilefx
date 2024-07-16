@@ -2,6 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
+      <module fileurl="file://$USER_HOME$/SynologyDrive/workspace/jsonpathfx/.idea/jsonpathfx.iml" filepath="$USER_HOME$/SynologyDrive/workspace/jsonpathfx/.idea/jsonpathfx.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/tilefx.iml" filepath="$PROJECT_DIR$/.idea/tilefx.iml" />
     </modules>
   </component>

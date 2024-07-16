@@ -105,6 +105,7 @@ class ThemeColor(enum.Enum):
     primary_surface_fg = enum.auto()
 
     secondary = enum.auto()
+    secondary_dim = enum.auto()
     secondary_fg = enum.auto()
     secondary_surface = enum.auto()
     secondary_surface_fg = enum.auto()
@@ -294,6 +295,7 @@ class ColorTheme:
             ThemeColor.primary_surface_fg: self.primary_fg.tone(10),
 
             ThemeColor.secondary: self.secondary.tone(40),
+            ThemeColor.secondary_dim: self.secondary.tone(60),
             ThemeColor.secondary_fg: self.secondary_fg.tone(90),
             ThemeColor.secondary_surface: self.secondary.tone(90),
             ThemeColor.secondary_surface_fg: self.secondary_fg.tone(10),
@@ -351,6 +353,7 @@ class ColorTheme:
             ThemeColor.primary_surface_fg: self.primary_fg.tone(90),
 
             ThemeColor.secondary: self.secondary.tone(80),
+            ThemeColor.secondary_dim: self.secondary.tone(60),
             ThemeColor.secondary_fg: self.secondary_fg.tone(20),
             ThemeColor.secondary_surface: self.secondary.tone(30),
             ThemeColor.secondary_surface_fg: self.secondary_fg.tone(90),
@@ -370,26 +373,26 @@ class ColorTheme:
             ThemeColor.field: self.neutral.tone(5),
             ThemeColor.field_alt: self.neutral.tone(10),
 
-            ThemeColor.surface_lowest: self.neutral.tone(15),
-            ThemeColor.surface_low: self.neutral.tone(18),
-            ThemeColor.surface: self.neutral.tone(20),
-            ThemeColor.surface_high: self.neutral.tone(25),
-            ThemeColor.surface_highest: self.neutral.tone(30),
-            ThemeColor.surface_outline: self.neutral.tone(40),
+            ThemeColor.surface_lowest: self.neutral.tone(10),
+            ThemeColor.surface_low: self.neutral.tone(14),
+            ThemeColor.surface: self.neutral.tone(17),
+            ThemeColor.surface_high: self.neutral.tone(20),
+            ThemeColor.surface_highest: self.neutral.tone(25),
+            ThemeColor.surface_outline: self.neutral.tone(35),
 
             ThemeColor.error: self.error.tone(80),
-            ThemeColor.error_fg: self.error.tone(20),
-            ThemeColor.error_surface: self.error.tone(30),
+            ThemeColor.error_fg: self.error.tone(15),
+            ThemeColor.error_surface: self.error.tone(20),
             ThemeColor.error_surface_fg: self.error.tone(80),
 
             ThemeColor.warning: self.warning.tone(80),
-            ThemeColor.warning_fg: self.warning.tone(20),
-            ThemeColor.warning_surface: self.warning.tone(30),
+            ThemeColor.warning_fg: self.warning.tone(15),
+            ThemeColor.warning_surface: self.warning.tone(20),
             ThemeColor.warning_surface_fg: self.warning.tone(80),
 
             ThemeColor.success: self.success.tone(80),
-            ThemeColor.success_fg: self.success.tone(20),
-            ThemeColor.success_surface: self.success.tone(30),
+            ThemeColor.success_fg: self.success.tone(15),
+            ThemeColor.success_surface: self.success.tone(20),
             ThemeColor.success_surface_fg: self.success.tone(80),
         }
         colors.update(basic_colors_dark)

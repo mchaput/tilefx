@@ -1,6 +1,7 @@
 from __future__ import annotations
 import enum
 import re
+from typing import NamedTuple
 
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
@@ -40,7 +41,14 @@ class State(enum.IntEnum):
     tri_dq_string = enum.auto()
 
 
-def token(state_int: int, line: str, pos=0) -> tuple[Style, int, int]:
+class Token(NamedTuple):
+    style: Style
+    end_pos: int
+    new_state: State | int
+    continues: bool = False
+
+
+def token(state_int: int, line: str, pos=0) -> Token:
     if state_int < 0:
         state_int = 1
     state: State = State(state_int & 15)
@@ -55,6 +63,7 @@ def token(state_int: int, line: str, pos=0) -> tuple[Style, int, int]:
     if state in (State.sq_string, State.dq_string, State.tri_sq_string,
                  State.tri_dq_string):
         style = Style.string
+        is_triple = state in (State.tri_sq_string, State.tri_dq_string)
         if m := c_escape.match(line, pos):
             style = Style.quote
             pos = m.end()
@@ -64,10 +73,8 @@ def token(state_int: int, line: str, pos=0) -> tuple[Style, int, int]:
         elif m := u_escape.match(line, pos):
             style = Style.quote
             pos = m.end()
-        elif line_cont.match(line, pos):
-            # Returning -1 as the new position means "line continue" ie don't
-            # reset the state on the next line
-            return Style.quote, -1, state_int
+        elif m := line_cont.match(line, pos):
+            return Token(Style.quote, m.end(), state_int, continues=True)
         elif char == "\\":
             style = Style.error
             pos += 1
@@ -75,112 +82,109 @@ def token(state_int: int, line: str, pos=0) -> tuple[Style, int, int]:
             (state == State.tri_sq_string and line.startswith("'''", pos)) or
             (state == State.tri_dq_string and line.startswith('"""', pos))
         ):
-            return Style.string, pos + 3, State.normal
+            return Token(Style.string, pos + 3, State.normal)
         elif (
             (state == State.sq_string and line.startswith("'", pos)) or
             (state == State.dq_string and line.startswith('"', pos))
         ):
-            return Style.string, pos + 1, State.normal
+            return Token(Style.string, pos + 1, State.normal)
         else:
             pos += 1
             # Fast-forward to the next interesting char
             while pos < len(line) and line[pos] not in "'\"\\":
                 pos += 1
 
-        if pos == len(line) and state in (State.sq_string, State.dq_string):
+        if pos == len(line) and not is_triple:
             state = State.normal
-        return style, pos, state
+        return Token(style, pos, state, continues=is_triple)
 
     elif char == "#":
-        return Style.comment, len(line), state
+        return Token(Style.comment, len(line), state)
 
-    elif line_cont.match(line, pos):
-        # Returning -1 as the new position means "line continue" ie don't
-        # reset the state on the next line
-        return Style.quote, -1, state_int
+    elif m := line_cont.match(line, pos):
+        return Token(Style.quote, m.end(), state_int, continues=True)
 
     elif type_level:
         if (state == State.in_class or state == State.in_def) and type_level == 2 and char == "]":
-            return Style.plain, pos + 1, state
+            return Token(Style.plain, pos + 1, state)
         elif type_level > 1 and char == "]":
-            return Style.plain, pos + 1, ((type_level - 1) << 4) | state.value
+            return Token(Style.plain, pos + 1,
+                         ((type_level - 1) << 4) | state.value)
         elif char == "[":
-            return Style.plain, pos + 1, ((type_level + 1) << 4) | state.value
+            return Token(Style.plain, pos + 1,
+                         ((type_level + 1) << 4) | state.value)
         else:
-            return Style.type, pos + 1, state_int
+            return Token(Style.type, pos + 1, state_int)
 
     elif line.startswith('"""', pos):
-        return Style.string, pos + 3, State.tri_dq_string
+        return Token(Style.string, pos + 3, State.tri_dq_string, continues=True)
 
     elif line.startswith("'''", pos):
-        return Style.string, pos + 3, State.tri_sq_string
+        return Token(Style.string, pos + 3, State.tri_sq_string, continues=True)
 
     elif line.startswith('"', pos):
         state = State.dq_string if pos + 1 < len(line) else State.normal
-        return Style.string, pos + 1, state
+        return Token(Style.string, pos + 1, state)
 
     elif line.startswith("'", pos):
         state = State.sq_string if pos + 1 < len(line) else State.normal
-        return Style.string, pos + 1, state
+        return Token(Style.string, pos + 1, state)
 
     elif m := class_expr.match(line, pos):
-        return Style.keyword, m.end(), State.in_class
+        return Token(Style.keyword, m.end(), State.in_class)
 
     elif state == State.in_class or state == State.in_def:
         if char == "[":
-            return Style.plain, pos + 1, (2 << 4) | state.value
+            return Token(Style.plain, pos + 1, (2 << 4) | state.value)
         elif char in "(:":
-            return Style.plain, pos + 1, State.normal
+            return Token(Style.plain, pos + 1, State.normal)
         else:
             style = Style.type if state == State.in_class else Style.func
-            return style, pos + 1, state
+            return Token(style, pos + 1, state)
 
     elif m := arrow_expr.match(line, pos):
-        return Style.plain, m.end(), (1 << 4) | state.value
+        return Token(Style.plain, m.end(), (1 << 4) | state.value)
 
     elif m := colon_expr.match(line, pos):
-        return Style.plain, m.end(), State.normal
+        return Token(Style.plain, m.end(), State.normal)
 
     elif char == ":":
-        return Style.plain, pos + 1, (1 << 4) | state.value
+        return Token(Style.plain, pos + 1, (1 << 4) | state.value)
 
     elif m := def_expr.match(line, pos):
-        return Style.keyword, m.end(), State.in_def
+        return Token(Style.keyword, m.end(), State.in_def)
 
     elif m := decorator_expr.match(line, pos):
-        return Style.extra, m.end(), state
+        return Token(Style.extra, m.end(), state)
 
     elif m := special_expr.match(line, pos):
-        return Style.extra, m.end(), state
+        return Token(Style.extra, m.end(), state)
 
     elif m := func_expr.match(line, pos):
-        return Style.func, m.end(), state
+        return Token(Style.func, m.end(), state)
 
     elif m := kw_expr.match(line, pos):
-        return Style.keyword, m.end(), state
+        return Token(Style.keyword, m.end(), state)
 
     elif m := soft_kw_expr.match(line, pos):
-        return Style.keyword, m.end(), state
+        return Token(Style.keyword, m.end(), state)
 
     elif m := return_anno.match(line, pos):
-        return Style.type, m.end(), state
+        return Token(Style.type, m.end(), state)
 
     elif m := number_expr.match(line, pos):
-        return Style.number, m.end(), state
-
+        return Token(Style.number, m.end(), state)
     else:
-        return Style.plain, pos + 1, state_int
+        return Token(Style.plain, pos + 1, state_int)
 
 
 class PythonHighlighter(HighlighterBase):
     def highlightBlock(self, text: str) -> None:
         state_int = self.previousBlockState()
         pos = 0
-        save_state = False
+        continues = False
         while pos < len(text):
-            style, endpos, state_int = token(state_int, text, pos)
-            save_state = endpos == -1
-            endpos = len(text) if endpos < 0 else endpos
+            style, endpos, state_int, continues = token(state_int, text, pos)
             # print("pos=", endpos, "style=", style, "state=",
             #       State(state_int & 15), state_int >> 4)
             if endpos <= pos:
@@ -196,6 +200,6 @@ class PythonHighlighter(HighlighterBase):
             state_int = State.normal
         # print("->", pos, state_int, State(state_int & 15),
         #       state_int >> 4, save_state)
-        if not (save_state or type_level > 1):
+        if not (continues or type_level > 1):
             state_int = State.normal
         self.setCurrentBlockState(state_int)

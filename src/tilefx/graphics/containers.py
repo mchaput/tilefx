@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import cast, Iterable, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Union
 
 from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
@@ -7,6 +7,9 @@ from PySide2.QtCore import Qt
 from ..config import settable
 from . import controls, core, effects, layouts
 from .core import graphictype, path_element, makeAnim, Graphic
+
+if TYPE_CHECKING:
+    from . import views
 
 
 @graphictype("containers.scroll")
@@ -18,7 +21,7 @@ class ScrollGraphic(core.RectangleGraphic):
         self._content: Optional[Graphic] = None
         self._scroll_pos = QtCore.QPointF(0, 0)
         self._vsb_item = controls.ScrollBarItem(Qt.Vertical, self)
-        self._vsb_item.setZValue(20)
+        self._vsb_item.setZValue(3)
         self._title_item: Optional[Graphic] = None
         self._title_target_name: Optional[str] = None
         self._title_target_item: Optional[Graphic] = None
@@ -56,11 +59,11 @@ class ScrollGraphic(core.RectangleGraphic):
     def addChild(self, item: QtWidgets.QGraphicsItem) -> None:
         self.setContentItem(item)
 
-    @path_element(Graphic, "contents")
-    def contentsItem(self) -> Graphic:
+    @path_element(Graphic)
+    def contentItem(self) -> Graphic:
         return self._content
 
-    @settable("content_item", value_object_type=Graphic)
+    @settable("content_item", argtype=Graphic)
     def setContentItem(self, item: Graphic) -> None:
         if self._content:
             # self._content.removeEventFilter(self)
@@ -92,7 +95,7 @@ class ScrollGraphic(core.RectangleGraphic):
     def contentsSizeHint(self, which: Qt.SizeHint,
                         constraint: QtCore.QSizeF = None) -> QtCore.QSizeF:
         constraint = constraint or QtCore.QSizeF(-1, -1)
-        return self.contentsItem().sizeHint(which, constraint)
+        return self.contentItem().sizeHint(which, constraint)
 
     def eventFilter(self, watched: QtWidgets.QGraphicsWidget,
                     event: QtCore.QEvent) -> bool:
@@ -105,18 +108,18 @@ class ScrollGraphic(core.RectangleGraphic):
     def titleItem(self) -> Optional[Graphic]:
         return self._title_item
 
-    @settable("title_item", value_object_type=Graphic)
+    @settable("title_item", argtype=Graphic)
     def setTitleItem(self, item: Graphic) -> None:
         self._title_item = item
         item.setParentItem(self)
-        item.setZValue(10)
+        item.setZValue(3)
         self._updateTitleAndFooterVisibility(animated=False)
 
     def titleTargetItem(self) -> Optional[QtWidgets.QGraphicsWidget]:
         name = self._title_target_name
         item = self._title_target_item
         if name and not item:
-            item = self.findChildGraphic(name, recursive=True)
+            item = self.findElement(name, recursive=True)
             self._title_target_item = item
         return item
 
@@ -133,24 +136,24 @@ class ScrollGraphic(core.RectangleGraphic):
     def footerItem(self) -> Optional[Graphic]:
         return self._footer_item
 
-    @settable("footer_item", value_object_type=Graphic)
+    @settable("footer_item", argtype=Graphic)
     def setFooterItem(self, item: Graphic) -> None:
         self._footer_item = item
         item.setParentItem(self)
-        item.setZValue(9)
+        item.setZValue(3)
         self._updateContents()
 
     def dataProxy(self) -> Optional[Graphic]:
-        return self.contentsItem()
+        return self.contentItem()
 
     def localEnv(self) -> dict[str, Any]:
-        return self.contentsItem().localEnv()
+        return self.contentItem().localEnv()
 
-    @path_element(Graphic, "title")
+    @path_element(Graphic)
     def titleItem(self) -> Graphic:
         return self._title_item
 
-    @path_element(Graphic, "footer")
+    @path_element(Graphic)
     def footerItem(self) -> Graphic:
         return self._footer_item
 
@@ -192,7 +195,7 @@ class ScrollGraphic(core.RectangleGraphic):
     def sizeHint(self, which: Qt.SizeHint, constraint: QtCore.QSizeF = None
                  ) -> QtCore.QSizeF:
         constraint = constraint or QtCore.QSizeF(-1, -1)
-        contents = self.contentsItem()
+        contents = self.contentItem()
         if contents:
             vsb_width = self.verticalScrollBar().width()
             cw = constraint.width()
@@ -210,7 +213,7 @@ class ScrollGraphic(core.RectangleGraphic):
         self._vsb_item.update()
 
     def _updateScrollPosition(self) -> None:
-        contents = self.contentsItem()
+        contents = self.contentItem()
         if not contents:
             return
         contents.setPos(-self._scroll_pos)
@@ -221,7 +224,7 @@ class ScrollGraphic(core.RectangleGraphic):
         rect = self.rect()
         width = rect.width()
         page_height = rect.height()
-        contents = self.contentsItem()
+        contents = self.contentItem()
         if not contents:
             return
         self._updating_contents = True
@@ -329,6 +332,185 @@ class ScrollGraphic(core.RectangleGraphic):
     #     painter.drawRect(r)
     #     painter.setPen(Qt.green)
     #     painter.drawRect(self.mapRectFromScene(self.viewportRect()))
+
+
+class TruncatedGraphic(core.RectangleGraphic):
+    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
+        super().__init__(parent)
+        self._visible = True
+        self._content: Optional[views.DataLayoutGraphic] = None
+        self._truncated_height = -1.0
+        self._shrink_min_height = 0.0
+        self._revealed = 1.0
+        self._is_truncated = False
+
+        self.setHasHeightForWidth(True)
+        # self.setMinimumHeight(32.0)
+        self.setClipping(True)
+
+    def contentItem(self) -> Optional[views.DataLayoutGraphic]:
+        return self._content
+
+    def resizeEvent(self, event):
+        self._updateContents()
+
+    def textToCopy(self) -> str:
+        if self._content:
+            return self._content.textToCopy()
+        else:
+            return ""
+
+    @settable(argtype=Graphic)
+    def setContentItem(self, item: views.DataLayoutGraphic) -> None:
+        if self._content:
+            self._content.visibleChanged.disconnect(self._updateVisibility)
+            self._content.geometryChanged.disconnect(self._onContentSizeChanged)
+            self._content.removeEventFilter(self)
+        self._content = item
+        self.addChild(item)
+        self._content.visibleChanged.connect(self._updateVisibility)
+        self._content.geometryChanged.connect(self._onContentSizeChanged)
+        self._content.installEventFilter(self)
+        self.updateGeometry()
+
+    def setVisible(self, visible: bool) -> None:
+        self._visible = visible
+        self._updateVisibility()
+
+    def shouldBeVisible(self) -> bool:
+        return self._visible and self._content.shouldBeVisible()
+
+    def _updateVisibility(self) -> None:
+        visible = self._visible and self._content.shouldBeVisible()
+        cur_vis = self.isVisible()
+        if visible != cur_vis:
+            super().setVisible(visible)
+            self.visibleChanged.emit()
+
+    def viewportRect(self) -> QtCore.QRectF:
+        # This must return the visible rect in SCENE coordinates
+        scene_r = self.parentViewportRect()
+        safe_r = self.mapRectToScene(self.rect())
+        return scene_r.intersected(safe_r)
+
+    def truncatedSize(self) -> QtCore.QSizeF:
+        size = self.size()
+        size.setHeight(self._truncated_height)
+        return size
+
+    def truncatedItemCount(self) -> int:
+        content = self.contentItem()
+        if not (content and self.isTruncated()):
+            return 0
+        total = content.rowCount()
+        shown = content.countForSize(self.truncatedSize())
+        return max(0, total - shown)
+
+    @settable()
+    def setSmallHeight(self, height: float) -> None:
+        self._truncated_height = height
+        self.setTruncated(bool(height))
+
+    def shrunkenMinimumHeight(self) -> float:
+        smh = self._shrink_min_height
+        smh = self._content.snappedHeight(smh)
+        return smh if smh > 0 else self.minimumHeight()
+
+    @settable("shrink_min")
+    def setShrunkenMinimumHeight(self, height: float) -> None:
+        self._shrink_min_height = height
+        self.updateGeometry()
+
+    def eventFilter(self, watched: QtWidgets.QGraphicsWidget,
+                    event: QtCore.QEvent) -> bool:
+        if watched == self._content and event.type() == event.LayoutRequest:
+            self._onContentSizeChanged()
+        return super().eventFilter(watched, event)
+
+    def _onContentSizeChanged(self) -> None:
+        self.updateGeometry()
+
+    def revealedValue(self) -> float:
+        return self._revealed
+
+    def setRevealedValue(self, fraction: float) -> None:
+        self._revealed = fraction
+        self.updateGeometry()
+
+    revealed = QtCore.Property(float, revealedValue, setRevealedValue)
+
+    def _contentSize(self, width: float) -> QtCore.QSizeF:
+        constraint = QtCore.QSizeF(width, -1)
+        if self._content:
+            return self._content.effectiveSizeHint(Qt.PreferredSize, constraint)
+        else:
+            return constraint
+
+    def sizeHint(self, which: Qt.SizeHint, constraint: QtCore.QSizeF = None
+                 ) -> QtCore.QSizeF:
+        constraint = constraint or QtCore.QSizeF(-1, -1)
+        if which == Qt.PreferredSize:
+            small_height = self._truncated_height
+            revealed = self.revealedValue()
+            csize = self._contentSize(constraint.width())
+            height = csize.height()
+            if height > small_height and revealed != 1.0:
+                height = small_height + (height - small_height) * revealed
+            return QtCore.QSizeF(constraint.width(), height)
+        else:
+            return super().sizeHint(which, constraint)
+
+    def canShrink(self) -> Optional[bool]:
+        return True
+
+    def shrinkHeightTo(self, height: float) -> None:
+        height = self._content.snappedHeight(height)
+        self._truncated_height = height
+        self.setTruncated(True)
+
+    def unshrink(self) -> None:
+        self.setTruncated(False)
+
+    def toggle(self, animated=False) -> None:
+        self.setTruncated(not self._is_truncated, animated=animated)
+
+    def isTruncated(self) -> bool:
+        return self._is_truncated
+
+    @settable(argtype=bool)
+    def setTruncated(self, truncated: bool, *, animated=False) -> None:
+        if self._truncated_height <= 0:
+            return
+        animated = animated and not self.animationDisabled()
+        if truncated == self._is_truncated:
+            # There seems to be a bug where _is_truncated gets out-of-sync with
+            # the actual state, so we always set the height even if trunacted ==
+            # self._is_truncated, but we won't animate that
+            animated = False
+        self._is_truncated = truncated
+
+        revealed = 0.0 if truncated else 1.0
+        if animated:
+            self.animateProperty(b"revealed", self.revealedValue(), revealed)
+        else:
+            self.setRevealedValue(revealed)
+        self.updateGeometry()
+
+    def _updateContents(self):
+        content = self._content
+        if not content:
+            return
+        rect = self.rect()
+        size = self._contentSize(rect.width())
+        crect = QtCore.QRectF(rect.topLeft(), size)
+        content.setGeometry(crect)
+
+    # def paint(self, painter: QtGui.QPainter,
+    #           option: QtWidgets.QStyleOptionGraphicsItem,
+    #           widget: Optional[QtWidgets.QWidget] = None) -> None:
+    #     r = self.rect()
+    #     r.setHeight(self._truncated_height)
+    #     painter.drawRect(r)
 
 
 class ContainerGraphic(core.AreaGraphic):
@@ -723,7 +905,7 @@ class ExpandingStackGraphic(ContainerGraphic):
         if first.geometry().contains(event.pos()):
             self.toggle()
 
-    @path_element(layouts.LinearArrangement, "layout")
+    @path_element(layouts.LinearArrangement)
     def arrangement(self) -> layouts.LinearArrangement:
         return self._arrangement
 
@@ -867,3 +1049,91 @@ class ExpandingStackGraphic(ContainerGraphic):
     #           widget: Optional[QtWidgets.QWidget] = None) -> None:
     #     painter.setPen(Qt.blue)
     #     painter.drawRect(self.rect())
+
+
+@graphictype("containers.roll_up")
+class RollUpGraphic(Graphic):
+    openStateChanged = QtCore.Signal()
+
+    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
+        super().__init__(parent=parent)
+        self._content_height = 0.0
+        self._revealed: float = 1.0
+        self._is_open = True
+        self.setClipping(True)
+        self._content: Optional[Graphic] = None
+
+        self.geometryChanged.connect(self._updateContents)
+
+    def contentItem(self) -> Optional[Graphic]:
+        return self._content
+
+    @settable(argtype=Graphic)
+    def setContentItem(self, content: Graphic):
+        self.prepareGeometryChange()
+        content.setParentItem(self)
+        self._content = content
+        self._updateContents()
+        self.updateGeometry()
+
+    def revealedFraction(self) -> float:
+        return self._revealed
+
+    def setRevealedFraction(self, revealed: float) -> None:
+        self._revealed = revealed
+        self.updateGeometry()
+        self._updateContents()
+
+    revealed = QtCore.Property(float, revealedFraction, setRevealedFraction)
+
+    def sizeHint(self, which: Qt.SizeHint, constraint: QtCore.QSizeF = None
+                 ) -> QtCore.QSizeF:
+        content = self._content
+        if not content:
+            return constraint
+
+        if which == Qt.MinimumSize:
+            return QtCore.QSizeF(constraint.width(), 0)
+        elif which == Qt.PreferredSize or which == Qt.MaximumSize:
+            size = content.effectiveSizeHint(which, constraint)
+            if which == Qt.PreferredSize:
+                height = size.height()
+                self._content_height = height
+                if 0.0 <= self._revealed <= 1.0:
+                    height *= self._revealed
+                size.setHeight(height)
+            return size
+        else:
+            return constraint
+
+    def toggle(self, animated=False) -> None:
+        self.setOpen(not self.isOpen(), animated=animated)
+
+    def isOpen(self) -> bool:
+        return self._is_open
+
+    @settable(argtype=bool)
+    def setOpen(self, open: bool, animated=True) -> None:
+        animated = animated and not self.animationDisabled()
+        self._is_open = open
+        revealed = float(open)
+        if animated:
+            self.animateProperty(b"revealed", self._revealed, revealed)
+        else:
+            self.setRevealedFraction(revealed)
+        self.openStateChanged.emit()
+
+    def _updateContents(self):
+        content = self._content
+        if not content:
+            return
+
+        height = self._content_height
+        revealed = self._revealed
+        hidden_fraction = 1.0 - max(0.0, min(1.0, revealed))
+        crect = self.rect()
+        r = QtCore.QRectF(crect.x(), crect.y() - height * hidden_fraction,
+                          crect.width(), height)
+        content.setGeometry(r)
+        content.setVisible(bool(revealed))
+

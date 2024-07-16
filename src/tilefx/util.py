@@ -141,6 +141,51 @@ def containingRectF(rects: Sequence[QtCore.QRectF]) -> QtCore.QRectF:
     return rect
 
 
+def roundedRectPath(r: QtCore.QRectF, tl_radius=0.0, tr_radius=0.0,
+                    bl_radius=0.0, br_radius=0.0) -> QtGui.QPainterPath:
+    p = QtGui.QPainterPath()
+    c = r.topLeft()
+    if tl_radius:
+        start = c + QtCore.QPointF(0, tl_radius)
+        p.moveTo(start)
+        p.cubicTo(c + QtCore.QPointF(0, tl_radius * 0.5),
+                  c + QtCore.QPointF(tl_radius * 0.5, 0),
+                  c + QtCore.QPointF(tl_radius, 0))
+    else:
+        p.moveTo(c)
+        start = c
+
+    c = r.topRight()
+    if tr_radius:
+        p.lineTo(c + QtCore.QPointF(-tr_radius, 0))
+        p.cubicTo(c + QtCore.QPointF(-tr_radius * 0.5, 0),
+                  c + QtCore.QPointF(0, tr_radius * 0.5),
+                  c + QtCore.QPointF(0, tr_radius))
+    else:
+        p.lineTo(c)
+
+    c = r.bottomRight()
+    if br_radius:
+        p.lineTo(c + QtCore.QPointF(0, -br_radius))
+        p.cubicTo(c + QtCore.QPointF(0, -br_radius * 0.5),
+                  c + QtCore.QPointF(-br_radius * 0.5, 0),
+                  c + QtCore.QPointF(-br_radius, 0))
+    else:
+        p.lineTo(c)
+
+    c = r.bottomLeft()
+    if bl_radius:
+        p.lineTo(c + QtCore.QPointF(bl_radius, 0))
+        p.cubicTo(c + QtCore.QPointF(bl_radius * 0.5, 0),
+                  c + QtCore.QPointF(0, -bl_radius * 0.5),
+                  c + QtCore.QPointF(0, -bl_radius))
+    else:
+        p.lineTo(c)
+
+    p.lineTo(start)
+    return p
+
+
 def alignedRectF(direction: Qt.LayoutDirection, alignment: Qt.Alignment,
                  size: QtCore.QSizeF, rectangle: QtCore.QSizeF
                  ) -> QtCore.QRectF:

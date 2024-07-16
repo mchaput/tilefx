@@ -97,7 +97,7 @@ class DataID(NamedTuple):
 
 
 class RowData(NamedTuple):
-    values: dict[DataID, Scalar]
+    data: int|float|str|dict
     env: dict[str, Any]
 
 
@@ -151,15 +151,18 @@ class RowFactory:
         expr_map = self.exprMap()
         unique_val_set: set[Scalar] = set()
 
-        for row_data in self.findRowDatas(data, env):
+        for row_data, row_env in self.findRowDatas(data, env):
             row: dict[DataID, Scalar] = {}
-            row_data.env["obj"] = row_data.values
-            self._addVariables(data, row_data.env)
+            if isinstance(row_data, dict):
+                row_env.update(row_data)
+            row_env["obj"] = row_data
+
+            self._addVariables(data, row_env)
 
             # Compute the key value first, and use it to compute the row color,
             # check for uniqueness, etc.
             if unique_id and unique_id in expr_map:
-                unique_val = expr_map[unique_id].evaluate(row_data.values,
+                unique_val = expr_map[unique_id].evaluate(row_data.data,
                                                           row_data.env)
                 if not isinstance(unique_val, (int, float, str)):
                     raise ValueError(f"Can't use {unique_val!r} as key value")
@@ -173,7 +176,7 @@ class RowFactory:
                 if unique_id and value_id == unique_id:
                     # If this is the unique value, we already did it above
                     continue
-                value = computed.evaluate(row_data.values, row_data.env)
+                value = computed.evaluate(row_data, row_env)
                 row[value_id] = value
 
             yield row
@@ -206,7 +209,7 @@ class ExprRowFactory(RowFactory):
         self.expr = expr
 
     def __repr__(self):
-        return f"<{type(self).__name__} {self.expr!r}"
+        return f"<{type(self).__name__} {self.expr!r}>"
 
     def findRowDatas(self, data: dict[str, Any], env: dict[str, Any]
                      ) -> Iterable[RowData]:
@@ -418,6 +421,7 @@ class BaseDataModel(QtCore.QAbstractTableModel):
 
     def __init__(self, parent: QtCore.QObject = None):
         super().__init__(parent)
+        self._rows: list[dict[DataID, Any]] = []
         self._role_lookup: dict[str, int] = {}
         self._next_custom_role = self.CustomRoleBase
         self._spec_cache: dict[int | str, DataID] = {}
@@ -426,6 +430,15 @@ class BaseDataModel(QtCore.QAbstractTableModel):
 
         for role_num, name_qbytes in super().roleNames().items():
             self._role_lookup[bytes(name_qbytes).decode("utf-8")] = role_num
+
+    def rowCount(self, parent=None) -> int:
+        return len(self._rows)
+
+    def rowObject(self, row_num: int) -> dict[DataID, Any]:
+        return self._rows[row_num]
+
+    def allRowObjects(self) -> Iterable[dict[DataID, Any]]:
+        return iter(self._rows)
 
     def addCustomRole(self, name: str, role_number: int = None) -> int:
         if role_number is None:
@@ -476,8 +489,9 @@ class BaseDataModel(QtCore.QAbstractTableModel):
         self._unique_data_id = unique_id
 
     def clear(self) -> None:
-        raise NotImplementedError
-
+        self.beginResetModel()
+        self._rows.clear()
+        self.endResetModel()
     def updateFromData(self, data: dict[str, Any], env: dict[str, Any]) -> None:
         raise NotImplementedError
 
@@ -498,7 +512,6 @@ class DataModel(BaseDataModel):
     def __init__(self, parent: QtCore.QObject = None):
         super().__init__(parent)
         self._debug_rows = False
-        self._rows: list[dict[DataID, Any]] = []
         self._row_factory: RowFactory = NullRowFactory()
         self._color_data_id = DataID(0, Qt.DecorationRole)
         self._color_map = ColorMap()
@@ -513,16 +526,8 @@ class DataModel(BaseDataModel):
         model.configureFromData(data, controller)
         return model
 
-    def clear(self) -> None:
-        self.beginResetModel()
-        self._rows.clear()
-        self.endResetModel()
-
     def colorMap(self) -> ColorMap:
         return self._color_map
-
-    def rowCount(self, parent=None) -> int:
-        return len(self._rows)
 
     def columnCount(self, parent=None) -> int:
         if self._column_count:

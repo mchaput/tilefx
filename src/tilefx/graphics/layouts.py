@@ -9,7 +9,7 @@ from PySide2 import QtCore, QtGui, QtWidgets
 from PySide2.QtCore import Qt
 
 from .. import converters
-from ..config import settable
+from ..config import compileSettables, settable
 from ..util import validSizeHint
 
 if TYPE_CHECKING:
@@ -24,7 +24,6 @@ PACKING_TOLERANCE = 0.1
 
 DEFAULT_MIN_COL_WIDTH = 200.0
 DEFAULT_ROW_HEIGHT = 24.0
-DEFAULT_ITEM_SPACING = 10.0
 
 
 class Justify(enum.Enum):
@@ -553,6 +552,7 @@ class OrientedArrangement(Arrangement):
             return self.verticalSpacing()
 
 
+@compileSettables
 class LinearArrangement(OrientedArrangement):
     def __init__(self, orientation=Qt.Vertical, parent: QtCore.QObject = None):
         super().__init__(orientation=orientation, parent=parent)
@@ -632,6 +632,7 @@ class LinearArrangement(OrientedArrangement):
         return QtCore.QSizeF(width, height)
 
 
+@compileSettables
 class FlowArrangement(OrientedArrangement):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(Qt.Horizontal, parent=parent)
@@ -806,6 +807,7 @@ class FlowArrangement(OrientedArrangement):
         return item_rects
 
 
+@compileSettables
 class SwitchArrangement(Arrangement):
     def __init__(self, parent: QtCore.QObject = None):
         super().__init__(parent)
@@ -835,6 +837,7 @@ class SwitchArrangement(Arrangement):
         )
 
 
+@compileSettables
 class Matrix(Arrangement):
     _auto_margins = False
 
@@ -845,9 +848,9 @@ class Matrix(Arrangement):
         self._max_column_width = 999999.0
         self._max_column_count = 999999
         self._row_height = DEFAULT_ROW_HEIGHT
-        self._h_space = DEFAULT_ITEM_SPACING
-        self._v_space = DEFAULT_ITEM_SPACING
+        self._spacing = QtCore.QSizeF(5.0, 5.0)
         self._stretch = True
+        self._fill_stretch = True
 
     def maximumColumnCount(self) -> int:
         return self._max_column_count
@@ -855,27 +858,6 @@ class Matrix(Arrangement):
     @settable("max_columns")
     def setMaximumColumnCount(self, count: int) -> None:
         self._max_column_count = count
-
-    def horizontalSpacing(self) -> float:
-        return self._h_space
-
-    @settable("h_space")
-    def setHorizontalSpacing(self, space: float) -> None:
-        self._h_space = space
-        self.invalidate()
-
-    def verticalSpacing(self) -> float:
-        return self._v_space
-
-    @settable("v_space")
-    def setVerticalSpacing(self, space: float) -> None:
-        self._v_space = space
-        self.invalidate()
-
-    @settable("spacing")
-    def setSpacing(self, space: float):
-        self._h_space = self._v_space = space
-        self.invalidate()
 
     def minimumColumnWidth(self) -> float:
         return self._min_column_width
@@ -909,6 +891,11 @@ class Matrix(Arrangement):
         self._stretch = stretch
         self.invalidate()
 
+    @settable()
+    def setFillStretch(self, fill_stretch: bool) -> None:
+        self._fill_stretch = fill_stretch
+        self.invalidate()
+
     def columnCount(self, width: float, item_count: int) -> int:
         if not item_count:
             return 0
@@ -921,8 +908,10 @@ class Matrix(Arrangement):
         min_col = self.minimumColumnWidth()
         avail = width - (ms.left() + ms.right())
         cols = int((avail + h_space) / (min_col + h_space)) or 1
-        cols = min(item_count, cols)
-        return min(cols, mcc)
+        cols = min(cols, mcc)
+        if self._fill_stretch:
+            cols = min(item_count, cols)
+        return cols
 
     def colsAndRows(self, width: float, item_count: int) -> tuple[int, int]:
         if item_count and width:
@@ -957,6 +946,26 @@ class Matrix(Arrangement):
     def singleColumnHeight(self, item_count: int) -> float:
         v_space = self.verticalSpacing()
         return item_count * self.rowHeight() + (v_space * (item_count - 1))
+
+    def countForSize(self, size: QtCore.QSizeF) -> int:
+        ms = self.margins()
+        # How many items will fit in the given area?
+        spacing = self.spacing()
+        hspace = spacing.width()
+        vspace = spacing.height()
+        col_w = self.minimumColumnWidth() + hspace
+        row_h = self.rowHeight() + vspace
+        w = size.width() - ms.left() - ms.right() + hspace
+        h = size.height() - ms.top() - ms.bottom() + vspace
+        cols = int(w // col_w)
+        rows = int(h // row_h)
+        return cols * rows
+
+    def snappedHeight(self, y: float) -> float:
+        vspace = self.verticalSpacing()
+        row_height_plus = self.rowHeight() + vspace
+        h = math.ceil(y / row_height_plus) * row_height_plus - vspace
+        return h + self.margins().top()
 
     def columnWidth(self, width: float, col_count: int) -> float:
         if not col_count:
@@ -1047,7 +1056,7 @@ class Matrix(Arrangement):
                                 rect: QtCore.QRectF) -> QtCore.QRect:
         col1, row1 = self.mapPointToCell(width, col_count, rect.topLeft())
         col2, row2 = self.mapPointToCell(width, col_count, rect.bottomRight())
-        return QtCore.QRect(col1, row1, col2 - col1, row2 - row1)
+        return QtCore.QRect(col1, row1, col2 - col1 + 1, row2 - row1 + 1)
 
     def mapVisualRecToCells(self, width: float, item_count: int,
                             rect: QtCore.QRectF) -> Iterable[tuple[int, int]]:
@@ -1098,6 +1107,108 @@ class Matrix(Arrangement):
             i += 1
 
 
+@compileSettables
+class SplitArrangement(Arrangement):
+    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
+        super().__init__(parent)
+        self._break_width = 400
+        self._spacing = QtCore.QSizeF(10, 10)
+        self._h_split = 0.5
+        self._left_width = -1.0
+
+    @settable()
+    def setBreakWidth(self, width: float):
+        self._break_width = width
+        self.invalidate()
+
+    def spacing(self) -> QtCore.QSizeF:
+        return QtCore.QSizeF(self._spacing)
+
+    @settable(argtype=QtCore.QSizeF)
+    def setSpacing(self, space: QtCore.QSizeF) -> None:
+        self._spacing = space
+        self.invalidate()
+
+    @settable("h_space")
+    def setHorizontalSpacing(self, space: float) -> None:
+        self._spacing.setWidth(space)
+        self.invalidate()
+
+    @settable("v_space")
+    def setVerticalSpacing(self, space: float) -> None:
+        self._spacing.setHeight(space)
+        self.invalidate()
+
+    @settable("h_split")
+    def setHorizontalSplit(self, factor: float) -> None:
+        self._h_split = factor
+        self.invalidate()
+
+    @settable()
+    def setSideWidth(self, width: float) -> None:
+        self._left_width = width
+        self.invalidate()
+
+    @staticmethod
+    def sides(items: Sequence[Graphic]
+              ) -> tuple[Optional[Graphic], Optional[Graphic]]:
+        left = items[0] if items else None
+        right = items[1] if len(items) > 1 else None
+        return left, right
+
+    def _rects(self, which: Qt.SizeHint, geom: QtCore.QRectF,
+               items: Sequence[QtWidgets.QGraphicsWidget]
+               ) -> Iterable[ItemRectPair]:
+        left, right = self.sides(items)
+        if not ((left and left.isVisible()) or
+                (right and right.isVisible())):
+            return
+        elif not (right and right.isVisible()) and (left and left.isVisible()):
+            yield items[0], geom
+            return
+
+        spacing = self._spacing
+        h_space = spacing.width()
+        v_space = spacing.height()
+        avail = geom.width() - h_space
+        if avail < self._break_width:
+            # Vertical
+            left_size = left.effectiveSizeHint(
+                Qt.PreferredSize, QtCore.QSizeF(geom.width(), -1)
+            )
+            left_rect = QtCore.QRectF(geom.topLeft(), left_size)
+            right_size = right.effectiveSizeHint(
+                Qt.PreferredSize, QtCore.QSizeF(geom.width(), -1)
+            )
+            right_rect = QtCore.QRectF(
+                QtCore.QPointF(geom.x(), left_rect.bottom() + v_space),
+                right_size
+            )
+        else:
+            # Horizontal
+            if self._left_width >= 0:
+                left_size = left.effectiveSizeHint(
+                    Qt.PreferredSize, QtCore.QSizeF(self._left_width, -1)
+                )
+                right_width = avail - left_size.width()
+            else:
+                left_width = avail * self._h_split
+                right_width = avail - left_width
+                left_size = left.effectiveSizeHint(
+                    Qt.PreferredSize, QtCore.QSizeF(left_width, -1)
+                )
+            left_rect = QtCore.QRectF(geom.topLeft(), left_size)
+            right_size = right.effectiveSizeHint(
+                Qt.PreferredSize, QtCore.QSizeF(right_width, -1)
+            )
+            rtl = QtCore.QPointF(left_rect.right() + h_space, geom.y())
+            right_rect = QtCore.QRectF(rtl, right_size)
+
+        yield left, left_rect
+        yield right, right_rect
+
+
+@compileSettables
 class KeyValueArrangement(Arrangement):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
@@ -1119,18 +1230,18 @@ class KeyValueArrangement(Arrangement):
 
     @staticmethod
     def _keyChildItem(item: Graphic, name: str) -> Optional[Graphic]:
-        key_item = item.findChildGraphic(name)
+        key_item = item.findElement(name)
         if not key_item:
-            kids = item.childGraphics()
+            kids = list(item.childGraphics())
             if kids:
                 key_item = kids[0]
         return key_item
 
     @staticmethod
     def _valueChildItem(item: Graphic, name: str) -> Optional[Graphic]:
-        value_item = item.findChildGraphic(name)
+        value_item = item.findElement(name)
         if not value_item:
-            kids = item.childGraphics()
+            kids = list(item.childGraphics())
             if len(kids) > 1:
                 value_item = kids[1]
         return value_item
@@ -1190,6 +1301,7 @@ class KeyValueArrangement(Arrangement):
             y += item_rect.height() + vspace
 
 
+@compileSettables
 class PackedArrangement(OrientedArrangement):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
@@ -1243,6 +1355,7 @@ class PackedArrangement(OrientedArrangement):
             yield item, rect
 
 
+@compileSettables
 class PackedGridArrangement(PackedArrangement):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
@@ -1396,7 +1509,6 @@ class PackedGridArrangement(PackedArrangement):
 
 
 # Adapter to provide an Arrangement as a QGraphicsLayout
-
 class ArrangementLayout(QtWidgets.QGraphicsLayout):
     def __init__(self, arrangement: Arrangement,
                  parent: QtWidgets.QGraphicsLayoutItem = None):
