@@ -1,8 +1,8 @@
 import pytest
 
 from tilefx.file.tilefile import (parse, ParserError, DictNode, ListNode,
-                                  LiteralValueNode, PythonValueNode, EnvVarNode,
-                                  PythonNode, JsonpathNode,
+                                  LiteralValueNode, ComputedValueNode, EnvVarNode,
+                                  CodeNode, JsonpathNode, ComputedKey,
                                   ObjectNode, ModelNode, ModuleNode)
 
 
@@ -132,7 +132,7 @@ def test_parse_list():
     assert p == ListNode([
         LiteralValueNode("foo"),
         LiteralValueNode(20),
-        PythonValueNode("foo.bar"),
+        ComputedValueNode("foo.bar"),
         LiteralValueNode(True)
     ])
 
@@ -145,8 +145,8 @@ def test_value_expr():
     }
     """)
     assert p == DictNode({
-        "foo": PythonValueNode("x + 5"),
-        "bar": PythonValueNode("(y / 2)")
+        "foo": ComputedValueNode("x + 5"),
+        "bar": ComputedValueNode("y / 2")
     })
 
     with pytest.raises(ParserError):
@@ -169,10 +169,21 @@ def test_multiline_value_expr():
     }
     """)
     assert p == DictNode({
-        "foo": PythonValueNode('(\n            "real" if is_real\n'
-                               '            else "unreal"\n        )'),
-        "comma": PythonValueNode("x + 10"),
+        "foo": ComputedValueNode('"real" if is_real\n'
+                               '            else "unreal"'),
+        "comma": ComputedValueNode("x + 10"),
         "bar": LiteralValueNode("hello")
+    })
+
+
+def test_value_expr_as_key():
+    p = parse("""
+    {
+        (DataID(0, "display")): "Hello"
+    }
+    """)
+    assert p == DictNode({
+        ComputedKey('DataID(0, "display")'): LiteralValueNode("Hello")
     })
 
 
@@ -184,8 +195,8 @@ def test_deferred_line_expr():
     }
     """)
     assert p == DictNode({
-        "foo": PythonNode("node.path() + node.name()", "eval"),
-        "bar": PythonNode("self.count()", "eval"),
+        "foo": CodeNode("node.path() + node.name()", "eval"),
+        "bar": CodeNode("self.count()", "eval"),
     })
 
 
@@ -199,7 +210,7 @@ def test_deferred_block_expr():
     }
     """)
     assert p == DictNode({
-        "foo": PythonNode(
+        "foo": CodeNode(
             '\n        x = 10\n        self.text = {"x": x}\n        ',
             "exec"
         ),
@@ -263,7 +274,7 @@ def test_parse_models():
         }
         """)
     assert p == ModelNode("attrs", {
-        "rows": PythonNode("attrs", "eval")
+        "rows": CodeNode("attrs", "eval")
     })
 
 
@@ -329,9 +340,9 @@ def test_parse_module():
     }
     """)
     assert p == ModuleNode([
-        PythonNode("\n    import m\n    ", "exec"),
+        CodeNode("\n    import m\n    ", "exec"),
         ObjectNode("surface", "root", {
-            "foo": PythonValueNode("m.xy")
+            "foo": ComputedValueNode("m.xy")
         })
     ])
 
@@ -436,8 +447,8 @@ def test_combined():
         "title_item": ObjectNode("Anchors", "titlebar", {
             "spacing": LiteralValueNode(8),
             "fixed_height": LiteralValueNode(28),
-            "fill_color": PythonValueNode("ThemeColor.bg"),
-            "on_update": PythonNode(
+            "fill_color": ComputedValueNode("ThemeColor.bg"),
+            "on_update": CodeNode(
                 '\n                x = 1\n                y = 2\n            ',
                 "exec"
             ),
@@ -450,14 +461,14 @@ def test_combined():
                     "spacing": LiteralValueNode(10)
                 }),
                 "anchor.vcenter": LiteralValueNode("parent.v_center"),
-                "icon_name": PythonNode("icon", "eval"),
+                "icon_name": CodeNode("icon", "eval"),
             }),
             ObjectNode("controls.Text", "titlebar_path", {
-                "text_color": PythonValueNode("ThemeColor.primary"),
-                "text_size": PythonValueNode("TextSize.small"),
-                "text_align": PythonValueNode(
+                "text_color": ComputedValueNode("ThemeColor.primary"),
+                "text_size": ComputedValueNode("TextSize.small"),
+                "text_align": ComputedValueNode(
                     "Qt.Align.vcenter | Qt.Align.left"),
-                "html": PythonNode('f"{parent_path}/<b>{node_name}</b>"',
+                "html": CodeNode('f"{parent_path}/<b>{node_name}</b>"',
                                    "eval")
             })
         ])

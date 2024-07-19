@@ -5,7 +5,7 @@ import dataclasses
 import enum
 import re
 from types import CodeType
-from typing import Any, Collection, Iterable, NamedTuple, Optional, Sequence
+from typing import Any, Collection, Iterable, NamedTuple, NewType, Optional
 
 import jsonpathfx
 
@@ -104,6 +104,9 @@ class AstNode:
     end = -1
 
 
+ComputedKey = NewType("ComputedKey", str)
+
+
 @dataclasses.dataclass
 class ModuleNode(AstNode):
     value: list[AstNode]
@@ -118,7 +121,7 @@ class ModuleNode(AstNode):
 
 
 @dataclasses.dataclass
-class PythonNode(AstNode):
+class CodeNode(AstNode):
     source: str
     mode: str
     start: int = dataclasses.field(default=-1, compare=False)
@@ -126,7 +129,7 @@ class PythonNode(AstNode):
 
 
 @dataclasses.dataclass
-class PythonValueNode(AstNode):
+class ComputedValueNode(AstNode):
     source: str
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
@@ -148,7 +151,7 @@ class LiteralValueNode(AstNode):
 
 @dataclasses.dataclass
 class DictNode(AstNode):
-    value: dict[str, AstNode]
+    value: dict[str | ComputedKey, AstNode]
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
 
@@ -258,7 +261,7 @@ def lex_string_literal(text: str, pos: int, allow_multiline_strings=True
 
 def parse_expression(text: str, pos: int,
                      end_chars: Collection[str] = "\r\n",
-                     line_end_is_error=False, allow_multiline_strings=True
+                     newline_is_error=False, allow_multiline_strings=True
                      ) -> tuple[str, int]:
     start = pos
     stack: list[tuple[str, pos]] = []
@@ -267,7 +270,7 @@ def parse_expression(text: str, pos: int,
         char = text[pos]
         if char in end_chars and not stack:
             break
-        if char in "\r\n" and not stack and line_end_is_error:
+        if char in "\r\n" and not stack and newline_is_error:
             raise ParserError(ErrType.expr,"Unexpected line end", text, pos)
 
         if char in brackets:
@@ -305,7 +308,7 @@ def parse_expression(text: str, pos: int,
 
 def parse_line_expr(text: str, pos: int) -> tuple[str, int]:
     expr_str, end_pos = parse_expression(text, pos, end_chars="\r\n`",
-                                         line_end_is_error=True,
+                                         newline_is_error=True,
                                          allow_multiline_strings=False)
     if end_pos < len(text) and text[end_pos] == "`":
         return expr_str, end_pos + 1
@@ -437,12 +440,12 @@ def lex(text: str, pos=0) -> Iterable[Token]:
         elif char == "]":
             out = Token(Kind.close_square, "]", pos, pos + 1)
             pos += 1
-        # elif char == "(":
-        #     out = Token(Kind.open_paren, "(", pos, pos + 1)
-        #     pos += 1
-        # elif char == ")":
-        #     out = Token(Kind.close_paren, ")", pos, pos + 1)
-        #     pos += 1
+        elif char == "(":
+            expr, end_pos = parse_expression(
+                text, pos + 1, end_chars=")", newline_is_error=False
+            )
+            out = Token(Kind.value_expr, expr, pos + 1, end_pos)
+            pos = end_pos + 1
         elif dict_depth and prev_kind == Kind.colon:
             expr, end_pos = parse_expression(text, pos, end_chars="\r\n,")
             out = Token(Kind.value_expr, expr, pos, end_pos)
@@ -496,6 +499,8 @@ class DictParselet(Parselet):
                 return DictNode(d, start=open_token.end, end=token.start)
             elif token.kind in (Kind.name, Kind.string):
                 key = token.payload
+            elif token.kind == Kind.value_expr:
+                key = ComputedKey(token.payload)
             else:
                 raise parser.expected(ErrType.dict_key, "dictionary key", token)
 
@@ -614,12 +619,12 @@ class LiteralParselet(Parselet):
 class ExprParselet(Parselet):
     def parse_prefix(self, parser: Parser, token: Token) -> AstNode:
         if token.kind == Kind.value_expr or token.kind == Kind.name:
-            return PythonValueNode(token.payload)
+            return ComputedValueNode(token.payload)
         elif token.kind == Kind.env_var:
             return EnvVarNode(token.payload)
         else:
             mode = "eval" if token.kind == Kind.line_expr else "exec"
-            return PythonNode(token.payload, mode)
+            return CodeNode(token.payload, mode)
 
 
 class JsonPathParselet(Parselet):
