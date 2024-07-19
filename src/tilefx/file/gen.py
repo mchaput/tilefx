@@ -5,9 +5,9 @@ from typing import Any, Callable, Optional
 
 import jsonpathfx
 
-from .tilefile import (newline_expr, AstNode, ModuleNode, PythonNode,
-                       PythonValueNode, JsonpathNode, LiteralValueNode,
-                       DictNode, ListNode, ObjectNode, ModelNode, EnvVarNode)
+from .tilefile import (newline_expr, AstNode, ModuleNode, DynamicPython,
+                       StaticPythonExpr, JsonpathNode, LiteralValueNode,
+                       DictNode, ListNode, ObjectNode, ModelNode, ComputedKey)
 
 
 def source_lines(source: str, level=1) -> list[str]:
@@ -78,7 +78,7 @@ def moduleSetup(node: ModuleNode, ctx: BuildContext) -> list[str]:
         if type(subnode) in setup_functions:
             lines.extend(indent_lines(setupFor(subnode, ctx), 1))
 
-        if isinstance(subnode, PythonNode) and subnode.mode == "exec":
+        if isinstance(subnode, DynamicPython) and subnode.mode == "exec":
             lines.extend(indent_lines(setupFor(subnode, ctx), 1))
         elif isinstance(subnode, ObjectNode):
             pass
@@ -104,26 +104,26 @@ def python_fn_name(ctx: BuildContext) -> str:
     return f"update_{ctx.obj_name}_{ctx.property_name}"
 
 
-def pythonSetup(node: PythonNode, ctx: BuildContext) -> list[str]:
+def pythonSetup(node: DynamicPython, ctx: BuildContext) -> list[str]:
     fn_name = python_fn_name(ctx)
     return [
         f"def {fn_name}(self: {ctx.class_name}) -> Any:"
     ] + source_lines(node.source)
 
 
-def pythonValue(node: PythonNode, ctx: BuildContext) -> str:
+def pythonValue(node: DynamicPython, ctx: BuildContext) -> str:
     fn_name = python_fn_name(ctx)
     return f"{fn_name}(self)"
 
 
-def pythonUpdate(node: PythonNode, ctx: BuildContext) -> str:
+def pythonUpdate(node: DynamicPython, ctx: BuildContext) -> str:
     if node.mode == "exec":
         return f"{python_fn_name(ctx)}(self)"
     else:
         return node.source
 
 
-def pyValueValue(node: PythonValueNode, ctx: BuildContext) -> str:
+def pyValueValue(node: StaticPythonExpr, ctx: BuildContext) -> str:
     return node.source
 
 
@@ -148,12 +148,16 @@ def literalValue(node: LiteralValueNode, ctx: BuildContext) -> str:
 
 
 def dictValue(node: DictNode, ctx: BuildContext) -> str:
-    return (
-        "{" +
-        ", ".join(f"{k!r}: {valueFor(v, ctx)}"
-                  for k, v in node.value.items()) +
-        "}"
-    )
+    its: list[str] = []
+    for k, v in node.value.items():
+        if isinstance(k, ComputedKey):
+            k_str = str(k)
+        elif isinstance(k, str):
+            k_str = repr(k)
+        else:
+            raise TypeError(f"Can't serialize key {k!r}")
+        its.append(f"{k_str}: {valueFor(v, ctx)}")
+    return "{" + ", ".join(its) + "}"
 
 
 def listValue(self, ctx: BuildContext) -> str:
@@ -198,6 +202,10 @@ def objectSetup(node: ObjectNode, ctx: BuildContext) -> list[str]:
         f"    __obj = {ctx.class_name}()",
         f"    __obj.setObjectName({name!r})"
     ])
+
+    if onup_node := node.params.pop("on_update"):
+        if isinstance(onup_node, DynamicPython) and onup_node.mode == "exec":
+            lines.extend(source_lines(onup_node.source))
 
     for n, p in statics:
         ctx.property_name = name
@@ -308,8 +316,8 @@ def modelUpdate(node: ModelNode, ctx: BuildContext) -> str:
 
 
 value_functions = {
-    PythonNode: pythonValue,
-    PythonValueNode: pyValueValue,
+    DynamicPython: pythonValue,
+    StaticPythonExpr: pyValueValue,
     JsonpathNode: jsonpathValue,
     LiteralValueNode: literalValue,
     DictNode: dictValue,
@@ -319,13 +327,12 @@ value_functions = {
 }
 setup_functions = {
     ModuleNode: moduleSetup,
-    PythonNode: pythonSetup,
+    DynamicPython: pythonSetup,
     JsonpathNode: jsonpathSetup,
 }
 update_functions = {
     ModuleNode: moduleUpdate,
-    PythonNode: pythonUpdate,
-    JsonpathNode: jsonpathUpdate,
+    DynamicPython: pythonUpdate,
     ObjectNode: objectSetup,
     ModelNode: modelUpdate
 }

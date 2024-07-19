@@ -121,7 +121,7 @@ class ModuleNode(AstNode):
 
 
 @dataclasses.dataclass
-class CodeNode(AstNode):
+class DynamicPython(AstNode):
     source: str
     mode: str
     start: int = dataclasses.field(default=-1, compare=False)
@@ -129,7 +129,7 @@ class CodeNode(AstNode):
 
 
 @dataclasses.dataclass
-class ComputedValueNode(AstNode):
+class StaticPythonExpr(AstNode):
     source: str
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
@@ -619,12 +619,12 @@ class LiteralParselet(Parselet):
 class ExprParselet(Parselet):
     def parse_prefix(self, parser: Parser, token: Token) -> AstNode:
         if token.kind == Kind.value_expr or token.kind == Kind.name:
-            return ComputedValueNode(token.payload)
+            return StaticPythonExpr(token.payload)
         elif token.kind == Kind.env_var:
             return EnvVarNode(token.payload)
         else:
             mode = "eval" if token.kind == Kind.line_expr else "exec"
-            return CodeNode(token.payload, mode)
+            return DynamicPython(token.payload, mode)
 
 
 class JsonPathParselet(Parselet):

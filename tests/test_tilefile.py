@@ -1,8 +1,8 @@
 import pytest
 
 from tilefx.file.tilefile import (parse, ParserError, DictNode, ListNode,
-                                  LiteralValueNode, ComputedValueNode, EnvVarNode,
-                                  CodeNode, JsonpathNode, ComputedKey,
+                                  LiteralValueNode, StaticPythonExpr, EnvVarNode,
+                                  DynamicPython, JsonpathNode, ComputedKey,
                                   ObjectNode, ModelNode, ModuleNode)
 
 
@@ -132,7 +132,7 @@ def test_parse_list():
     assert p == ListNode([
         LiteralValueNode("foo"),
         LiteralValueNode(20),
-        ComputedValueNode("foo.bar"),
+        StaticPythonExpr("foo.bar"),
         LiteralValueNode(True)
     ])
 
@@ -145,8 +145,8 @@ def test_value_expr():
     }
     """)
     assert p == DictNode({
-        "foo": ComputedValueNode("x + 5"),
-        "bar": ComputedValueNode("y / 2")
+        "foo": StaticPythonExpr("x + 5"),
+        "bar": StaticPythonExpr("y / 2")
     })
 
     with pytest.raises(ParserError):
@@ -169,9 +169,9 @@ def test_multiline_value_expr():
     }
     """)
     assert p == DictNode({
-        "foo": ComputedValueNode('"real" if is_real\n'
+        "foo": StaticPythonExpr('"real" if is_real\n'
                                '            else "unreal"'),
-        "comma": ComputedValueNode("x + 10"),
+        "comma": StaticPythonExpr("x + 10"),
         "bar": LiteralValueNode("hello")
     })
 
@@ -195,8 +195,8 @@ def test_deferred_line_expr():
     }
     """)
     assert p == DictNode({
-        "foo": CodeNode("node.path() + node.name()", "eval"),
-        "bar": CodeNode("self.count()", "eval"),
+        "foo": DynamicPython("node.path() + node.name()", "eval"),
+        "bar": DynamicPython("self.count()", "eval"),
     })
 
 
@@ -210,7 +210,7 @@ def test_deferred_block_expr():
     }
     """)
     assert p == DictNode({
-        "foo": CodeNode(
+        "foo": DynamicPython(
             '\n        x = 10\n        self.text = {"x": x}\n        ',
             "exec"
         ),
@@ -274,7 +274,7 @@ def test_parse_models():
         }
         """)
     assert p == ModelNode("attrs", {
-        "rows": CodeNode("attrs", "eval")
+        "rows": DynamicPython("attrs", "eval")
     })
 
 
@@ -340,9 +340,9 @@ def test_parse_module():
     }
     """)
     assert p == ModuleNode([
-        CodeNode("\n    import m\n    ", "exec"),
+        DynamicPython("\n    import m\n    ", "exec"),
         ObjectNode("surface", "root", {
-            "foo": ComputedValueNode("m.xy")
+            "foo": StaticPythonExpr("m.xy")
         })
     ])
 
@@ -447,8 +447,8 @@ def test_combined():
         "title_item": ObjectNode("Anchors", "titlebar", {
             "spacing": LiteralValueNode(8),
             "fixed_height": LiteralValueNode(28),
-            "fill_color": ComputedValueNode("ThemeColor.bg"),
-            "on_update": CodeNode(
+            "fill_color": StaticPythonExpr("ThemeColor.bg"),
+            "on_update": DynamicPython(
                 '\n                x = 1\n                y = 2\n            ',
                 "exec"
             ),
@@ -461,14 +461,14 @@ def test_combined():
                     "spacing": LiteralValueNode(10)
                 }),
                 "anchor.vcenter": LiteralValueNode("parent.v_center"),
-                "icon_name": CodeNode("icon", "eval"),
+                "icon_name": DynamicPython("icon", "eval"),
             }),
             ObjectNode("controls.Text", "titlebar_path", {
-                "text_color": ComputedValueNode("ThemeColor.primary"),
-                "text_size": ComputedValueNode("TextSize.small"),
-                "text_align": ComputedValueNode(
+                "text_color": StaticPythonExpr("ThemeColor.primary"),
+                "text_size": StaticPythonExpr("TextSize.small"),
+                "text_align": StaticPythonExpr(
                     "Qt.Align.vcenter | Qt.Align.left"),
-                "html": CodeNode('f"{parent_path}/<b>{node_name}</b>"',
+                "html": DynamicPython('f"{parent_path}/<b>{node_name}</b>"',
                                    "eval")
             })
         ])
