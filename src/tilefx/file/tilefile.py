@@ -4,6 +4,7 @@ import ast
 import dataclasses
 import enum
 import re
+import textwrap
 from types import CodeType
 from typing import Any, Collection, Iterable, NamedTuple, NewType, Optional
 
@@ -32,14 +33,18 @@ class ErrType(enum.Enum):
 
 class ParserError(Exception):
     def __init__(self, err_type: ErrType, msg: str, text: str, start=-1, end=-1,
-                 token: Token = None):
+                 fragment: str = None, token: Token = None):
         if not isinstance(err_type, ErrType):
             raise TypeError(err_type)
         if token is not None:
             start = token.start
             end = token.end
+            fragment = text[max(0, start - 5):min(len(text), end + 10)]
 
-        super().__init__(f"{msg} at {coords(text, start)}")
+        err_msg = f"{msg} at {coords(text, start)}"
+        if fragment:
+            err_msg = f"{err_msg}: {fragment!r}"
+        super().__init__(err_msg)
         self.err_type = err_type
         self.start = start
         self.end = end
@@ -98,13 +103,15 @@ escapable_chars: dict[str, str] = {
 brackets = {"(": ")", "[": "]", "{": "}"}
 endbrackets = frozenset(brackets.values())
 
+ComputedKey = NewType("ComputedKey", str)
+
 
 class AstNode:
     start = -1
     end = -1
 
-
-ComputedKey = NewType("ComputedKey", str)
+    def dynamic(self) -> bool:
+        return False
 
 
 @dataclasses.dataclass
@@ -121,11 +128,23 @@ class ModuleNode(AstNode):
 
 
 @dataclasses.dataclass
-class DynamicPython(AstNode):
+class PythonExpr(AstNode):
     source: str
-    mode: str
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
+
+    def dynamic(self) -> bool:
+        return True
+
+
+@dataclasses.dataclass
+class PythonBlock(AstNode):
+    source: str
+    start: int = dataclasses.field(default=-1, compare=False)
+    end: int = dataclasses.field(default=-1, compare=False)
+
+    def dynamic(self) -> bool:
+        return True
 
 
 @dataclasses.dataclass
@@ -141,9 +160,12 @@ class JsonpathNode(AstNode):
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
 
+    def dynamic(self) -> bool:
+        return True
+
 
 @dataclasses.dataclass
-class LiteralValueNode(AstNode):
+class Literal(AstNode):
     value: int|float|str|dict|list|tuple|None
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
@@ -166,9 +188,9 @@ class ListNode(AstNode):
 @dataclasses.dataclass
 class ObjectNode(AstNode):
     type_name: str
-    obj_name: Optional[str]
+    name: Optional[str]
     params: dict[str, AstNode]
-    items: Optional[list[ObjectNode]] = None
+    items: list = dataclasses.field(default_factory=list)
     is_template: bool = False
     type_name_start: int = dataclasses.field(default=-1, compare=False)
     obj_name_start: int = dataclasses.field(default=-1, compare=False)
@@ -178,7 +200,7 @@ class ObjectNode(AstNode):
 
 @dataclasses.dataclass
 class ModelNode(AstNode):
-    obj_name: Optional[str]
+    name: Optional[str]
     params: dict[str, AstNode]
     obj_name_start: int = dataclasses.field(default=-1, compare=False)
     start: int = dataclasses.field(default=-1, compare=False)
@@ -557,7 +579,7 @@ class ObjectParselet(Parselet):
 
         out.start = kw_token.start
         name_token = parser.optional(Kind.string)
-        out.obj_name = name_token.payload if name_token else None
+        out.name = name_token.payload if name_token else None
         out.obj_name_start = name_token.start if name_token else -1
 
         parser.skip_any(Kind.newline)
@@ -604,8 +626,6 @@ class ObjectParselet(Parselet):
 
         if finished:
             out.end = token.start
-            if not items:
-                out.items = None
             return out
         else:
             raise parser.err(ErrType.bracket, "Unclosed brace", open_token)
@@ -613,7 +633,7 @@ class ObjectParselet(Parselet):
 
 class LiteralParselet(Parselet):
     def parse_prefix(self, parser: Parser, token: Token) -> AstNode:
-        return LiteralValueNode(token.payload)
+        return Literal(token.payload)
 
 
 class ExprParselet(Parselet):
@@ -623,8 +643,11 @@ class ExprParselet(Parselet):
         elif token.kind == Kind.env_var:
             return EnvVarNode(token.payload)
         else:
-            mode = "eval" if token.kind == Kind.line_expr else "exec"
-            return DynamicPython(token.payload, mode)
+            source = textwrap.dedent(token.payload).strip()
+            if token.kind == Kind.line_expr:
+                return PythonExpr(source)
+            else:
+                return PythonBlock(source)
 
 
 class JsonPathParselet(Parselet):
@@ -757,4 +780,6 @@ class Parser:
 
 def parse(text: str) -> AstNode:
     return Parser(text).parse()
+
+
 

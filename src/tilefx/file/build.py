@@ -5,9 +5,10 @@ from typing import Any, Callable, Optional
 
 import jsonpathfx
 
-from .tilefile import (newline_expr, AstNode, ModuleNode, DynamicPython,
-                       StaticPythonExpr, JsonpathNode, LiteralValueNode,
-                       DictNode, ListNode, ObjectNode, ModelNode, ComputedKey)
+from .tilefile import (newline_expr, AstNode, ModuleNode,
+                       PythonExpr, PythonBlock, StaticPythonExpr, JsonpathNode,
+                       Literal, DictNode, ListNode, ObjectNode, ModelNode,
+                       ComputedKey)
 
 
 def source_lines(source: str, level=1) -> list[str]:
@@ -31,11 +32,12 @@ def indent_lines(lines: list[str], level=1):
 class BuildContext:
     obj: Any
     obj_name: str
-    class_name: str
-    parent_name: Optional[str]
-    property_name: Optional[str]
+    type_name: str
     memo: dict[int, Any] = dataclasses.field(default_factory=dict)
     warns: list[tuple[str, AstNode]] = dataclasses.field(default_factory=list)
+    parent_name: Optional[str] = None
+    parent_type_name: Optional[str] = None
+    property_name: Optional[str] = None
 
 
 SetupFunction = Callable[[AstNode, BuildContext], list[str]]
@@ -44,20 +46,22 @@ UpdateFunction = Callable[[AstNode, BuildContext], str]
 
 
 def objName(node: ObjectNode) -> str:
-    if node.obj_name:
-        return node.obj_name
+    if node.name:
+        return node.name
     else:
         return f"obj_{id(node):x}"
 
 
 def modelName(node: ModelNode) -> str:
-    if node.obj_name:
-        return node.obj_name
+    if node.name:
+        return node.name
     else:
         return f"model_{id(node):x}"
 
 
 def setupFor(node: AstNode, ctx: BuildContext) -> list[str]:
+    if type(node) not in setup_functions:
+        raise TypeError(f"No setup function for {type(node)}")
     return setup_functions[type(node)](node, ctx)
 
 
@@ -70,60 +74,63 @@ def updateFor(node: AstNode, ctx: BuildContext) -> str:
 
 
 def moduleSetup(node: ModuleNode, ctx: BuildContext) -> list[str]:
-    lines: list[str] = [
-        "def setupModule():"
-    ]
-    for subnode in node.value:
-        ctx.parent_name = None
-        if type(subnode) in setup_functions:
-            lines.extend(indent_lines(setupFor(subnode, ctx), 1))
+    # Sort models first so objects can refer to them
+    items = list(node.value)
+    items.sort(key=lambda sub: int(not isinstance(sub, ModelNode)))
 
-        if isinstance(subnode, DynamicPython) and subnode.mode == "exec":
-            lines.extend(indent_lines(setupFor(subnode, ctx), 1))
-        elif isinstance(subnode, ObjectNode):
+    lines: list[str] = []
+    for sub in items:
+        ctx.parent_name = None
+        if type(sub) in setup_functions:
+            lines.extend(setupFor(sub, ctx))
+
+        if isinstance(sub, PythonBlock):
+            lines.extend(setupFor(sub, ctx))
+        elif isinstance(sub, ObjectNode):
             pass
-        elif isinstance(subnode, ModelNode) and subnode.obj_name:
+        elif isinstance(sub, ModelNode) and sub.name:
             pass
         else:
-            ctx.warns.append(("Module property has no effect", subnode))
+            ctx.warns.append(("Module property has no effect", sub))
 
-    dynamic = [sub for sub in node.value if type(sub) in update_functions]
+    dynamic = [sub for sub in items if type(sub) in update_functions]
     if dynamic:
-        lines.append("def updateModuleFromData(data, env):")
-        for subnode in dynamic:
-            lines.append(f"    {updateFor(subnode, ctx)}")
+        lines.append("def _updateModuleFromData(_data, _env):")
+        for sub in dynamic:
+            lines.append(f"    {updateFor(sub, ctx)}")
 
     return lines
 
 
 def moduleUpdate(node: ModelNode, ctx: BuildContext) -> str:
-    return "updateModuleFromData(data, env)"
+    return "updateModuleFromData(_data, _env)"
 
 
-def python_fn_name(ctx: BuildContext) -> str:
+def python_block_update_fn_name(ctx: BuildContext) -> str:
     return f"update_{ctx.obj_name}_{ctx.property_name}"
 
 
-def pythonSetup(node: DynamicPython, ctx: BuildContext) -> list[str]:
-    fn_name = python_fn_name(ctx)
+def pythonBlockSetup(node: PythonBlock, ctx: BuildContext) -> list[str]:
+    fn_name = python_block_update_fn_name(ctx)
     return [
-        f"def {fn_name}(self: {ctx.class_name}) -> Any:"
+        f"def {fn_name}(obj, _data, _env) -> Any:"
     ] + source_lines(node.source)
 
 
-def pythonValue(node: DynamicPython, ctx: BuildContext) -> str:
-    fn_name = python_fn_name(ctx)
-    return f"{fn_name}(self)"
+def pythonBlockValue(node: PythonBlock, ctx: BuildContext) -> str:
+    fn_name = python_block_update_fn_name(ctx)
+    return f"{fn_name}(obj, _data, _env)"
 
 
-def pythonUpdate(node: DynamicPython, ctx: BuildContext) -> str:
-    if node.mode == "exec":
-        return f"{python_fn_name(ctx)}(self)"
-    else:
-        return node.source
+def pythonExprValue(node: PythonExpr, ctx: BuildContext) -> str:
+    return node.source
 
 
-def pyValueValue(node: StaticPythonExpr, ctx: BuildContext) -> str:
+def pythonExprUpdate(node: PythonExpr, ctx: BuildContext) -> str:
+    return node.source
+
+
+def pythonStaticValue(node: StaticPythonExpr, ctx: BuildContext) -> str:
     return node.source
 
 
@@ -140,17 +147,17 @@ def jsonpathSetup(node: JsonpathNode, ctx: BuildContext) -> list[str]:
 
 def jsonpathValue(node: JsonpathNode, ctx: BuildContext) -> str:
     path_var = jsonpath_var_name(ctx)
-    return f"{path_var}.values(data, env)"
+    return f"{path_var}.values(_data, _env)"
 
 
-def literalValue(node: LiteralValueNode, ctx: BuildContext) -> str:
+def literalValue(node: Literal, ctx: BuildContext) -> str:
     return repr(node.value)
 
 
 def dictValue(node: DictNode, ctx: BuildContext) -> str:
     its: list[str] = []
     for k, v in node.value.items():
-        if isinstance(k, ComputedKey):
+        if type(k) is ComputedKey:
             k_str = str(k)
         elif isinstance(k, str):
             k_str = repr(k)
@@ -169,11 +176,11 @@ def listValue(self, ctx: BuildContext) -> str:
 
 
 def object_setup_fn_name(ctx: BuildContext) -> str:
-    return f"make_{ctx.obj_name}"
+    return f"_make_{ctx.obj_name}"
 
 
 def object_update_fn_name(ctx: BuildContext) -> str:
-    return f"update_{ctx.obj_name}"
+    return f"_update_{ctx.obj_name}"
 
 
 def objectValue(node: ObjectNode, ctx: BuildContext) -> str:
@@ -185,62 +192,93 @@ def objectValue(node: ObjectNode, ctx: BuildContext) -> str:
 
 
 def objectSetup(node: ObjectNode, ctx: BuildContext) -> list[str]:
+    lines = []
     ctx.obj_name = name = objName(node)
     setup_fn_name = object_setup_fn_name(ctx)
     update_fn_name = object_update_fn_name(ctx)
-    statics = [x for x in node.params if type(x[1]) not in update_functions]
-    dynamics = [x for x in node.params if type(x[1]) in update_functions]
+    parent_name = ctx.parent_name
+    parent_type_name = ctx.parent_type_name
+    # cls_name = graphic_class_registry[node.type_name]
 
-    lines = []
-    for n, p in dynamics:
-        ctx.property_name = name
+    on_setup = node.params.pop("on_setup", None)
+    on_update = node.params.pop("on_update", None)
+
+    for k, p in node.params.items():
+        ctx.parent_name = node.name
+        ctx.parent_typ_name = node.type_name
+        ctx.property_name = k
         if type(p) in setup_functions:
             lines.extend(setupFor(p, ctx))
 
     lines.extend([
-        f"def {setup_fn_name}(parent: Any) -> {ctx.class_name}:",
-        f"    __obj = {ctx.class_name}()",
-        f"    __obj.setObjectName({name!r})"
+        f"def {setup_fn_name}() -> {ctx.type_name}:",
+        f"    _obj = {node.type_name}()",
+        f"    _obj.setObjectName({name!r})"
     ])
+    if on_setup and isinstance(on_setup, PythonBlock):
+        lines.extend(source_lines(on_setup.source))
 
-    if onup_node := node.params.pop("on_update"):
-        if isinstance(onup_node, DynamicPython) and onup_node.mode == "exec":
-            lines.extend(source_lines(onup_node.source))
-
-    for n, p in statics:
+    dyns = [k for k, p in node.params.items() if p.dynamic()]
+    statics = [k for k in node.params if k not in dyns]
+    for k in statics:
+        p = node.params[k]
         ctx.property_name = name
-        lines.append(f"    setProperty({name}, {n}, {valueFor(p, ctx)})")
-    lines.append("    return __obj")
+        lines.append(f"    _obj.{k} = {valueFor(p, ctx)}")
 
-    if dynamics:
-        lines.append(f"def {update_fn_name}(self, data, env) -> None:")
-        for n, p in dynamics:
-            ctx.property_name = n
-            lines.append(f"    setProperty({name}, {n}, {updateFor(p, ctx)})")
+    lines.append("    return _obj")
 
     if not node.is_template:
-        lines.append(f"{ctx.obj_name} = {setup_fn_name}({ctx.parent_name}")
-        if ctx.parent_name:
-            lines.append(f"{ctx.parent_name}.addItem({ctx.obj_name}")
+        lines.append(f"{ctx.obj_name} = {setup_fn_name}()")
 
-    ctx.parent_name = name
     for child in node.items:
+        ctx.parent_name = name
+        ctx.parent_typ_name = node.type_name
         lines.extend(setupFor(child, ctx))
+
+    for child in node.items:
+        lines.append(f"{name}.addItem({objName(child)})")
+
+    if dyns or node.items:
+        lines.extend([
+            f"def {update_fn_name}(obj, _data, _env) -> None:",
+            "    _env |= obj.localEnv()"
+        ])
+        if on_update and isinstance(on_update, PythonBlock):
+            lines.append("    # on_update")
+            lines.extend(source_lines(on_update.source))
+
+        for k in dyns:
+            p = node.params[k]
+            ctx.obj_name = name
+            ctx.property_name = k
+            value_expr = valueFor(p, ctx)
+            assert isinstance(value_expr, str)
+            lines.append(f"    obj.{k} = {value_expr}")
+        for k, p in node.params.items():
+            if type(p) in update_functions:
+                ctx.obj_name = name
+                ctx.property_name = k
+                lines.append(f"    {updateFor(p, ctx)}")
+
+        for child in node.items:
+            ctx.parent_name = name
+            ctx.parent_typ_name = node.type_name
+            lines.append(f"    {updateFor(child, ctx)}")
 
     return lines
 
 
 def objectUpdate(node: ObjectNode, ctx: BuildContext) -> str:
     ctx.obj_name = name = objName(node)
-    return f"{object_update_fn_name(ctx)}({name}, data, env)"
+    return f"{object_update_fn_name(ctx)}({name}, _data, _env)"
 
 
 def model_setup_fn_name(ctx: BuildContext) -> str:
-    return f"make_model_{ctx.obj_name}"
+    return f"_make_model_{ctx.obj_name}"
 
 
 def model_update_fn_name(ctx: BuildContext) -> str:
-    return f"update_model_{ctx.obj_name}"
+    return f"_update_model_{ctx.obj_name}"
 
 
 def modelValue(node: ModelNode, ctx: BuildContext) -> str:
@@ -284,42 +322,46 @@ def modelSetup(node: ModelNode, ctx: BuildContext) -> list[str]:
         lines.append(f"    __model.setUniqueDataID({valueFor(uid_node, ctx)}")
 
     if rows_node:
-        if type(rows_node) in update_functions:
+        if rows_node.dynamic():
+            print("YYYY")
             lines.extend([
-                f"def {update_fn_name}(self: DataModel, data, env) -> None:"
-                "    row_objs = []"
+                f"def {update_fn_name}(model: DataModel, _data, _env) -> None:",
+                "    _row_objs = []"
             ])
             for n, p in cols:
-                lines.append(f"    _{n} = self.dataToID({n!r})")
+                lines.append(f"    _{n} = model.dataToID({n!r})")
             lines.extend([
-                f"    for row in {valueFor(rows_node, ctx)}:"
-                "        row_objs.append({"
+                f"    for row in {valueFor(rows_node, ctx)}:",
+                "        _row_objs.append({"
             ])
             for n, p in cols:
                 ctx.property_name = n
                 lines.append(f"            _{n}: {valueFor(p, ctx)}")
             lines.append("        }")
-            lines.append(f"    {name}.setRows(row_objs)")
+            lines.append(f"    {name}.setRows(_row_objs)")
         elif isinstance(rows_node, ListNode):
             ctx.property_name = "rows"
-            lines.append(f"    __model.setRows({valueFor(rows_node, ctx)}")
+            lines.append(f"    model.setRows({valueFor(rows_node, ctx)}")
         else:
             ctx.warns.append(("Rows property must be an expression or list",
                               rows_node))
+
+
 
     return lines
 
 
 def modelUpdate(node: ModelNode, ctx: BuildContext) -> str:
     ctx.obj_name = name = modelName(node)
-    return f"{model_update_fn_name(ctx)}({name}, data, env)"
+    return f"{model_update_fn_name(ctx)}({name}, _data, _env)"
 
 
 value_functions = {
-    DynamicPython: pythonValue,
-    StaticPythonExpr: pyValueValue,
+    PythonExpr: pythonExprValue,
+    PythonBlock: pythonBlockValue,
+    StaticPythonExpr: pythonStaticValue,
     JsonpathNode: jsonpathValue,
-    LiteralValueNode: literalValue,
+    Literal: literalValue,
     DictNode: dictValue,
     ListNode: listValue,
     ObjectNode: objectValue,
@@ -327,12 +369,13 @@ value_functions = {
 }
 setup_functions = {
     ModuleNode: moduleSetup,
-    DynamicPython: pythonSetup,
+    PythonBlock: pythonBlockSetup,
     JsonpathNode: jsonpathSetup,
+    ObjectNode: objectSetup,
+    ModelNode: modelSetup,
 }
 update_functions = {
     ModuleNode: moduleUpdate,
-    DynamicPython: pythonUpdate,
-    ObjectNode: objectSetup,
-    ModelNode: modelUpdate
+    ObjectNode: objectUpdate,
+    ModelNode: modelUpdate,
 }
