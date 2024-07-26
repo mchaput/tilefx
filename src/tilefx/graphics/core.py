@@ -1,4 +1,5 @@
 from __future__ import annotations
+import dataclasses
 import pathlib
 import time
 from collections import defaultdict
@@ -193,6 +194,12 @@ def copyItemContentsToClipboard(items: Sequence[Graphic], text: str = None,
         )
 
     copyTextToClipboard(text)
+
+
+@dataclasses.dataclass
+class GraphicTemplate:
+    create: Callable[[Optional[Graphic]], Graphic]
+    update: Callable[[Graphic, Any, dict[str, Any]], None]
 
 
 class GraphicScene(QtWidgets.QGraphicsScene):
@@ -1220,18 +1227,24 @@ settable("size", argtype=QtCore.QSizeF)(Graphic.resize)
 def graphicFromData(data: dict[str, Any], parent: Graphic = None,
                     controller: config.DataController = None,
                     scene: GraphicScene = None) -> Graphic:
-    # Make a copy of the data dict so we can pop keys off and not affect
-    # the caller
-    data = data.copy()
-    typename = data.pop("type", "text")
-    try:
-        graphic_class = graphic_class_registry[typename]
-    except KeyError:
-        raise Exception(f"Unknown tile type: {typename!r}")
-    if not issubclass(graphic_class, Graphic):
-        raise TypeError(f"Class {graphic_class} is not a subclass of Graphic")
+    if isinstance(data, GraphicTemplate):
+        graphic = data.create(parent)
+    elif isinstance(data, dict):
+        # Make a copy of the data dict so we can pop keys off and not affect
+        # the caller
+        data = data.copy()
+        typename = data.pop("type", "text")
+        try:
+            cls = graphic_class_registry[typename]
+        except KeyError:
+            raise Exception(f"Unknown tile type: {typename!r}")
+        if not issubclass(cls, Graphic):
+            raise TypeError(f"Class {cls} is not a subclass of Graphic")
+        graphic = cls.fromData(data, parent=parent,
+                                         controller=controller)
+    else:
+        raise TypeError(f"Can't create graphic from {data!r}")
 
-    graphic = graphic_class.fromData(data, parent=parent, controller=controller)
     if scene:
         scene.addItem(graphic)
 

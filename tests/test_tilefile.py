@@ -2,72 +2,73 @@ import pathlib
 
 import pytest
 
-from tilefx.file import tilefile, build
+from tilefx.file import build
+from tilefx.file import tilefile as tf
 
 
 def test_empty_file():
-    assert tilefile.parse("") == tilefile.ModuleNode([])
-    assert tilefile.parse("""
+    assert tf.parse("") == tf.ModuleNode([])
+    assert tf.parse("""
     # Hello there
     # This file is empty
     
-    """) == tilefile.ModuleNode([])
+    """) == tf.ModuleNode([])
 
 
 def test_parse_literals():
-    assert tilefile.parse("100") == tilefile.Literal(100)
-    assert tilefile.parse("  -12.455\n\n  ") == tilefile.Literal(-12.455)
-    assert tilefile.parse("true") == tilefile.Literal(True)
-    assert tilefile.parse("\n false \n ") == tilefile.Literal(False)
-    assert tilefile.parse(" null") == tilefile.Literal(None)
+    assert tf.parse("100") == tf.Literal(100)
+    assert tf.parse("  -12.455\n\n  ") == tf.Literal(-12.455)
+    assert tf.parse("true") == tf.Literal(True)
+    assert tf.parse("\n false \n ") == tf.Literal(False)
+    assert tf.parse(" null") == tf.Literal(None)
 
 
 def test_empty_dict():
-    assert tilefile.parse("{}") == tilefile.DictNode({})
-    assert tilefile.parse("\n\n{   \n}\n\n\n") == tilefile.DictNode({})
-    assert tilefile.parse("{            }") == tilefile.DictNode({})
+    assert tf.parse("{}") == tf.DictNode({})
+    assert tf.parse("\n\n{   \n}\n\n\n") == tf.DictNode({})
+    assert tf.parse("{            }") == tf.DictNode({})
 
 
 def test_json_dict():
-    p = tilefile.parse(
+    p = tf.parse(
         ' { "alfa": "bravo", "charlie": "delta", "echo": "foxtrot" }'
     )
-    assert p == tilefile.DictNode({
-        "alfa": tilefile.Literal("bravo"),
-        "charlie": tilefile.Literal("delta"),
-        "echo": tilefile.Literal("foxtrot"),
+    assert p == tf.DictNode({
+        "alfa": tf.Literal("bravo"),
+        "charlie": tf.Literal("delta"),
+        "echo": tf.Literal("foxtrot"),
     })
 
-    p = tilefile.parse("""
+    p = tf.parse("""
     {
         "alfa": "bravo",
         "charlie": "delta",
         "echo": "foxtrot"
     }
     """)
-    assert p == tilefile.DictNode({
-        "alfa": tilefile.Literal("bravo"),
-        "charlie": tilefile.Literal("delta"),
-        "echo": tilefile.Literal("foxtrot"),
+    assert p == tf.DictNode({
+        "alfa": tf.Literal("bravo"),
+        "charlie": tf.Literal("delta"),
+        "echo": tf.Literal("foxtrot"),
     })
 
 
 def test_json_dict_trailing_comma():
-    p = tilefile.parse("""
+    p = tf.parse("""
     {
         "alfa": "bravo",
         "charlie": "delta",
         "echo": "foxtrot",
     }
     """)
-    assert p == tilefile.DictNode({
-        "alfa": tilefile.Literal("bravo"),
-        "charlie": tilefile.Literal("delta"),
-        "echo": tilefile.Literal("foxtrot"),
+    assert p == tf.DictNode({
+        "alfa": tf.Literal("bravo"),
+        "charlie": tf.Literal("delta"),
+        "echo": tf.Literal("foxtrot"),
     })
 
-    with pytest.raises(tilefile.ParserError):
-        tilefile.parse("""
+    with pytest.raises(tf.ParserError):
+        tf.parse("""
         {
             "alfa": "bravo",
             "charlie": "delta",
@@ -77,52 +78,52 @@ def test_json_dict_trailing_comma():
 
 
 def test_dict_no_commas():
-    p = tilefile.parse("""
+    p = tf.parse("""
     {
         "alfa": "bravo"
         "charlie": "delta"
         "echo": "foxtrot"
         "golf": "hotel"}
     """)
-    assert p == tilefile.DictNode({
-        "alfa": tilefile.Literal("bravo"),
-        "charlie": tilefile.Literal("delta"),
-        "echo": tilefile.Literal("foxtrot"),
-        "golf": tilefile.Literal("hotel"),
+    assert p == tf.DictNode({
+        "alfa": tf.Literal("bravo"),
+        "charlie": tf.Literal("delta"),
+        "echo": tf.Literal("foxtrot"),
+        "golf": tf.Literal("hotel"),
     })
 
 
 def test_dict_of_dicts():
-    p = tilefile.parse("""
+    p = tf.parse("""
     {
         foo: {alfa: "bravo", charlie: "delta"}
         bar: {echo: "foxtrot", golf: "hotel"}
     }
     """)
-    assert p == tilefile.DictNode({
-        "foo": tilefile.DictNode({
-            "alfa": tilefile.Literal("bravo"),
-            "charlie": tilefile.Literal("delta")
+    assert p == tf.DictNode({
+        "foo": tf.DictNode({
+            "alfa": tf.Literal("bravo"),
+            "charlie": tf.Literal("delta")
         }),
-        "bar": tilefile.DictNode({
-            "echo": tilefile.Literal("foxtrot"),
-            "golf": tilefile.Literal("hotel")
+        "bar": tf.DictNode({
+            "echo": tf.Literal("foxtrot"),
+            "golf": tf.Literal("hotel")
         }),
     })
 
 
 def test_parse_list():
-    p = tilefile.parse("""
+    p = tf.parse("""
     [ "foo", 20, obj hello {}, true]
     """)
-    assert p == tilefile.ListNode([
-        tilefile.Literal("foo"),
-        tilefile.Literal(20),
-        tilefile.ObjectNode("hello", None, {}),
-        tilefile.Literal(True)
+    assert p == tf.ListNode([
+        tf.Literal("foo"),
+        tf.Literal(20),
+        tf.ObjectNode("hello", None, {}),
+        tf.Literal(True)
     ])
 
-    p = tilefile.parse("""
+    p = tf.parse("""
     [
         "foo",
         20,
@@ -130,28 +131,28 @@ def test_parse_list():
         true,
     ]
     """)
-    assert p == tilefile.ListNode([
-        tilefile.Literal("foo"),
-        tilefile.Literal(20),
-        tilefile.StaticPythonExpr("foo.bar"),
-        tilefile.Literal(True)
+    assert p == tf.ListNode([
+        tf.Literal("foo"),
+        tf.Literal(20),
+        tf.StaticPythonExpr("foo.bar"),
+        tf.Literal(True)
     ])
 
 
 def test_value_expr():
-    p = tilefile.parse("""
+    p = tf.parse("""
     {
         foo: x + 5
         bar: (y / 2)
     }
     """)
-    assert p == tilefile.DictNode({
-        "foo": tilefile.StaticPythonExpr("x + 5"),
-        "bar": tilefile.StaticPythonExpr("y / 2")
+    assert p == tf.DictNode({
+        "foo": tf.StaticPythonExpr("x + 5"),
+        "bar": tf.StaticPythonExpr("y / 2")
     })
 
-    with pytest.raises(tilefile.ParserError):
-        tilefile.parse("""
+    with pytest.raises(tf.ParserError):
+        tf.parse("""
         {
             foo: 20 100
         }
@@ -159,7 +160,7 @@ def test_value_expr():
 
 
 def test_multiline_value_expr():
-    p = tilefile.parse("""
+    p = tf.parse("""
     {
         foo: (
             "real" if is_real
@@ -169,41 +170,41 @@ def test_multiline_value_expr():
         bar: "hello"
     }
     """)
-    assert p == tilefile.DictNode({
-        "foo": tilefile.StaticPythonExpr('"real" if is_real\n'
+    assert p == tf.DictNode({
+        "foo": tf.StaticPythonExpr('"real" if is_real\n'
                                '            else "unreal"'),
-        "comma": tilefile.StaticPythonExpr("x + 10"),
-        "bar": tilefile.Literal("hello")
+        "comma": tf.StaticPythonExpr("x + 10"),
+        "bar": tf.Literal("hello")
     })
 
 
 def test_value_expr_as_key():
-    p = tilefile.parse("""
+    p = tf.parse("""
     {
         (DataID(0, "display")): "Hello"
     }
     """)
-    assert p == tilefile.DictNode({
-        tilefile.ComputedKey('DataID(0, "display")'):
-            tilefile.Literal("Hello")
+    assert p == tf.DictNode({
+        tf.ComputedKey('DataID(0, "display")'):
+            tf.Literal("Hello")
     })
 
 
 def test_deferred_line_expr():
-    p = tilefile.parse("""
+    p = tf.parse("""
     {
         foo: `node.path() + node.name()`,
         bar: `self.count()`
     }
     """)
-    assert p == tilefile.DictNode({
-        "foo": tilefile.PythonExpr("node.path() + node.name()"),
-        "bar": tilefile.PythonExpr("self.count()"),
+    assert p == tf.DictNode({
+        "foo": tf.PythonExpr("node.path() + node.name()"),
+        "bar": tf.PythonExpr("self.count()"),
     })
 
 
 def test_deferred_block_expr():
-    p = tilefile.parse("""
+    p = tf.parse("""
     {
         foo: ```
         x = 10
@@ -211,13 +212,13 @@ def test_deferred_block_expr():
         ```
     }
     """)
-    assert p == tilefile.DictNode({
-        "foo": tilefile.PythonBlock('x = 10\nself.text = {"x": x}'),
+    assert p == tf.DictNode({
+        "foo": tf.PythonBlock('x = 10\nself.text = {"x": x}'),
     })
 
 
 def test_parse_jsonpath():
-    p = tilefile.parse("""
+    p = tf.parse("""
     {
         foo: $.foo.bar
         bar: $.alfa.bravo
@@ -225,98 +226,98 @@ def test_parse_jsonpath():
         robotron: 2000
     }
     """)
-    assert p == tilefile.DictNode({
-        "robotron": tilefile.Literal(2000),
-        "not_a_path": tilefile.Literal("$.alfa.bravo"),
-        "foo": tilefile.JsonpathNode("$.foo.bar"),
-        "bar": tilefile.JsonpathNode("$.alfa.bravo"),
+    assert p == tf.DictNode({
+        "robotron": tf.Literal(2000),
+        "not_a_path": tf.Literal("$.alfa.bravo"),
+        "foo": tf.JsonpathNode("$.foo.bar"),
+        "bar": tf.JsonpathNode("$.alfa.bravo"),
     })
 
 
 def test_parse_jsonpath_this():
-    p = tilefile.parse("""
+    p = tf.parse("""
     model "foo" {
         rows: $.attrs
         name: @.name
         type: @.type
     }
     """)
-    assert p == tilefile.ModelNode("foo", {
-        "rows": tilefile.JsonpathNode("$.attrs"),
-        "name": tilefile.JsonpathNode("@.name"),
-        "type": tilefile.JsonpathNode("@.type")
+    assert p == tf.ModelNode("foo", {
+        "rows": tf.JsonpathNode("$.attrs"),
+        "name": tf.JsonpathNode("@.name"),
+        "type": tf.JsonpathNode("@.type")
     })
 
 
 def test_parse_object():
-    p = tilefile.parse("""
+    p = tf.parse("""
     obj surface {
         foo: 100
         bar: "baz"
     }
     """)
-    assert p == tilefile.ObjectNode("surface", None, {
-        "foo": tilefile.Literal(100),
-        "bar": tilefile.Literal("baz")
+    assert p == tf.ObjectNode("surface", None, {
+        "foo": tf.Literal(100),
+        "bar": tf.Literal("baz")
     })
 
-    p = tilefile.parse("""
+    p = tf.parse("""
     obj surface "root" {
         foo: 100
         bar: "baz"
     }
     """)
-    assert p == tilefile.ObjectNode("surface", "root", {
-        "foo": tilefile.Literal(100),
-        "bar": tilefile.Literal("baz")
+    assert p == tf.ObjectNode("surface", "root", {
+        "foo": tf.Literal(100),
+        "bar": tf.Literal("baz")
     })
 
 
 def test_parse_models():
-    p = tilefile.parse("""
+    p = tf.parse("""
         model {
             rows: $.rows.items()
         }
         """)
-    assert p == tilefile.ModelNode(None, {
-        "rows": tilefile.JsonpathNode("$.rows.items()")
+    assert p == tf.ModelNode(None, {
+        "rows": tf.JsonpathNode("$.rows.items()")
     })
 
-    p = tilefile.parse("""
+    p = tf.parse("""
         model "attrs" {
             rows: `attrs`
         }
         """)
-    assert p == tilefile.ModelNode("attrs", {
-        "rows": tilefile.PythonExpr("attrs")
+    assert p == tf.ModelNode("attrs", {
+        "rows": tf.PythonExpr("attrs")
     })
 
 
 def test_parse_template():
-    p = tilefile.parse("""
+    p = tf.parse("""
     template anchors {
         x: 10
         y: "why"
     }
     """)
-    assert p == tilefile.ObjectNode("anchors", None, {
-        "x": tilefile.Literal(10),
-        "y": tilefile.Literal("why")
+    assert p == tf.ObjectNode("anchors", None, {
+        "x": tf.Literal(10),
+        "y": tf.Literal("why")
     }, is_template=True)
 
-    p = tilefile.parse("""
+    p = tf.parse("""
     template rectangle "count" {
         x: 10
         y: "why"
     }
     """)
-    assert p == tilefile.ObjectNode("rectangle", "count", {
-        "x": tilefile.Literal(10),
-        "y": tilefile.Literal("why")
+    assert p == tf.ObjectNode("rectangle", "count", {
+        "x": tf.Literal(10),
+        "y": tf.Literal("why")
     }, is_template=True)
 
-    with pytest.raises(tilefile.ParserError):
-        tilefile.parse("""
+    with pytest.raises(tf.ParserError):
+        tf.parse("""
         template {
             x: 10
             y: "why"
@@ -325,7 +326,7 @@ def test_parse_template():
 
 
 def test_object_values():
-    p = tilefile.parse("""
+    p = tf.parse("""
     obj surface "root" {
         foo: 100
         title_item: obj text {
@@ -335,18 +336,18 @@ def test_object_values():
         bar: "baz"
     }
     """)
-    assert p == tilefile.ObjectNode("surface", "root", {
-        "foo": tilefile.Literal(100),
-        "title_item": tilefile.ObjectNode("text", None, {
-            "x": tilefile.Literal(10),
-            "y": tilefile.Literal(20)
+    assert p == tf.ObjectNode("surface", "root", {
+        "foo": tf.Literal(100),
+        "title_item": tf.ObjectNode("text", None, {
+            "x": tf.Literal(10),
+            "y": tf.Literal(20)
         }),
-        "bar": tilefile.Literal("baz")
+        "bar": tf.Literal("baz")
     })
 
 
 def test_parse_on_update():
-    p = tilefile.parse("""
+    p = tf.parse("""
     obj surface {
         ```
         x = 10
@@ -356,12 +357,12 @@ def test_parse_on_update():
         z: 40
     }
     """)
-    assert p == tilefile.ObjectNode("surface", None, {
-        "y": tilefile.Literal(20),
-        "z": tilefile.Literal(40)
-    }, on_update=tilefile.PythonBlock("x = 10"))
+    assert p == tf.ObjectNode("surface", None, {
+        "y": tf.Literal(20),
+        "z": tf.Literal(40)
+    }, on_update=tf.PythonBlock("x = 10"))
 
-    p = tilefile.parse("""
+    p = tf.parse("""
     model "foo" {
         ```
         x = 10
@@ -372,14 +373,14 @@ def test_parse_on_update():
         z: `row.z`
     }
     """)
-    assert p == tilefile.ModelNode("foo", {
-        "rows": tilefile.JsonpathNode("$.attrs.*"),
-        "y": tilefile.PythonExpr("row.y"),
-        "z": tilefile.PythonExpr("row.z")
-    }, on_update=tilefile.PythonBlock("x = 10"))
+    assert p == tf.ModelNode("foo", {
+        "rows": tf.JsonpathNode("$.attrs.*"),
+        "y": tf.PythonExpr("row.y"),
+        "z": tf.PythonExpr("row.z")
+    }, on_update=tf.PythonBlock("x = 10"))
 
-    with pytest.raises(tilefile.ParserError):
-        tilefile.parse("""
+    with pytest.raises(tf.ParserError):
+        tf.parse("""
         obj surface {
             x: 20
             ```
@@ -388,8 +389,8 @@ def test_parse_on_update():
         }
         """)
 
-    with pytest.raises(tilefile.ParserError):
-        tilefile.parse("""
+    with pytest.raises(tf.ParserError):
+        tf.parse("""
         obj surface {
             ```
             print('hello')
@@ -400,7 +401,7 @@ def test_parse_on_update():
 
 
 def test_parse_module():
-    p = tilefile.parse("""
+    p = tf.parse("""
     ```
     import m
     ```
@@ -409,31 +410,31 @@ def test_parse_module():
         foo: m.xy
     }
     """)
-    assert p == tilefile.ModuleNode([
-        tilefile.PythonBlock("import m"),
-        tilefile.ObjectNode("surface", "root", {
-            "foo": tilefile.StaticPythonExpr("m.xy")
+    assert p == tf.ModuleNode([
+        tf.PythonBlock("import m"),
+        tf.ObjectNode("surface", "root", {
+            "foo": tf.StaticPythonExpr("m.xy")
         })
     ])
 
 
 def test_env_var():
-    assert tilefile.parse("$HOUDINI_TEST") == \
-           tilefile.EnvVarNode("HOUDINI_TEST")
+    assert tf.parse("$HOUDINI_TEST") == \
+           tf.EnvVarNode("HOUDINI_TEST")
 
-    p = tilefile.parse("""
+    p = tf.parse("""
     {
         text: $JOB
         bold: true
     }
     """)
-    assert p == tilefile.DictNode({
-        "text": tilefile.EnvVarNode("JOB"),
-        "bold": tilefile.Literal(True)
+    assert p == tf.DictNode({
+        "text": tf.EnvVarNode("JOB"),
+        "bold": tf.Literal(True)
     })
 
-    with pytest.raises(tilefile.ParserError):
-        tilefile.parse("""
+    with pytest.raises(tf.ParserError):
+        tf.parse("""
         {
             text: $JOB + 20
             bold: true
@@ -442,7 +443,7 @@ def test_env_var():
 
 
 def test_object_items():
-    p = tilefile.parse("""
+    p = tf.parse("""
     obj surface "root" {
         x: 10
         y: "why"
@@ -454,74 +455,74 @@ def test_object_items():
         }
     }
     """)
-    assert p == tilefile.ObjectNode("surface", "root", {
-        "x": tilefile.Literal(10),
-        "y": tilefile.Literal("why"),
+    assert p == tf.ObjectNode("surface", "root", {
+        "x": tf.Literal(10),
+        "y": tf.Literal("why"),
     }, [
-        tilefile.ObjectNode("text", None, {
-            "html": tilefile.Literal("Hello")
+        tf.ObjectNode("text", None, {
+            "html": tf.Literal("Hello")
         }),
-        tilefile.ObjectNode("foo", None, {}, is_template=True),
-        tilefile.ModelNode(None, {
-            "rows": tilefile.JsonpathNode("$.attrs")
+        tf.ObjectNode("foo", None, {}, is_template=True),
+        tf.ModelNode(None, {
+            "rows": tf.JsonpathNode("$.attrs")
         })
     ])
 
 
 def test_combined():
     text = pathlib.Path("../files/nodeinfo.tilefile").read_text()
-    p = tilefile.parse(text)
-    assert p == tilefile.ObjectNode("surface", "root", {
-        "spacing": tilefile.Literal(10),
-        "margins": tilefile.Literal(5),
-        "title_target": tilefile.Literal("node_header"),
-        "cutoff_item": tilefile.Literal("comment_layout"),
-        "label": tilefile.PythonExpr("node.name()"),
-        "memory": tilefile.JsonpathNode("$.memory.total"),
-        "title_item": tilefile.ObjectNode("anchors", None, {
-            "spacing": tilefile.Literal(5),
-            "fixed_height": tilefile.Literal(28),
-            "fill_color": tilefile.StaticPythonExpr("ThemeColor.bg"),
-            "on_update": tilefile.PythonBlock(
+    p = tf.parse(text)
+    assert p == tf.ObjectNode("surface", "root", {
+        "spacing": tf.Literal(10),
+        "margins": tf.Literal(5),
+        "title_target": tf.Literal("node_header"),
+        "cutoff_item": tf.Literal("comment_layout"),
+        "label": tf.PythonExpr("node.name()"),
+        "memory": tf.JsonpathNode("$.memory.total"),
+        "title_item": tf.ObjectNode("anchors", None, {
+            "spacing": tf.Literal(5),
+            "fixed_height": tf.Literal(28),
+            "fill_color": tf.StaticPythonExpr("ThemeColor.bg"),
+            "on_update": tf.PythonBlock(
                 'titlebar_icon.icon_name = icon\n'
                 'titlebar_path.html = f"{parent_path}/<b>{node_name}</b>"'
             ),
         }, [
-            tilefile.ObjectNode("houdini_icon", "titlebar_icon", {
-                "fixed_size": tilefile.ListNode([
-                    tilefile.Literal(28),
-                    tilefile.Literal(28)]
+            tf.ObjectNode("houdini_icon", "titlebar_icon", {
+                "fixed_size": tf.ListNode([
+                    tf.Literal(28),
+                    tf.Literal(28)]
                 ),
-                "anchor.left": tilefile.DictNode({
-                    "to": tilefile.Literal("parent.left"),
-                    "spacing": tilefile.Literal(10)
+                "anchor.left": tf.DictNode({
+                    "to": tf.Literal("parent.left"),
+                    "spacing": tf.Literal(10)
                 }),
-                "anchor.vcenter": tilefile.Literal("parent.v_center"),
-                "icon_name": tilefile.PythonExpr("icon"),
+                "anchor.vcenter": tf.Literal("parent.v_center"),
+                "icon_name": tf.PythonExpr("icon"),
             }),
-            tilefile.ObjectNode("controls.text", "titlebar_path", {
-                "text_color": tilefile.StaticPythonExpr("ThemeColor.primary"),
-                "text_size": tilefile.StaticPythonExpr("TextSize.small"),
-                "text_align": tilefile.StaticPythonExpr(
+            tf.ObjectNode("controls.text", "titlebar_path", {
+                "text_color": tf.StaticPythonExpr("ThemeColor.primary"),
+                "text_size": tf.StaticPythonExpr("TextSize.small"),
+                "text_align": tf.StaticPythonExpr(
                     "Qt.Align.vcenter | Qt.Align.left"),
-                "html": tilefile.PythonExpr(
+                "html": tf.PythonExpr(
                     'f"{parent_path}/<b>{node_name}</b>"',
                 )
             })
         ])
     }, [
-        tilefile.ObjectNode("row", "node_header", {
-            "bg_visible": tilefile.Literal(False),
-            "margins": tilefile.Literal(0),
-            "spacing": tilefile.Literal(5)
+        tf.ObjectNode("row", "node_header", {
+            "bg_visible": tf.Literal(False),
+            "margins": tf.Literal(0),
+            "spacing": tf.Literal(5)
         })
     ])
 
 
 def test_generation():
     text = pathlib.Path("../files/nodeinfo.tilefile").read_text()
-    p = tilefile.parse(text)
-    assert isinstance(p, tilefile.ModuleNode)
+    p = tf.parse(text)
+    assert isinstance(p, tf.ModuleNode)
     ctx = build.BuildContext(p, "", "")
     lines = build.moduleSetup(p, ctx)
     print("\n".join(lines))

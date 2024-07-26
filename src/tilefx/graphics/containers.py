@@ -1106,14 +1106,14 @@ class RollUpGraphic(Graphic):
         else:
             return constraint
 
-    def toggle(self, animated=False) -> None:
+    def toggle(self, animated=True) -> None:
         self.setOpen(not self.isOpen(), animated=animated)
 
     def isOpen(self) -> bool:
         return self._is_open
 
     @settable(argtype=bool)
-    def setOpen(self, open: bool, animated=True) -> None:
+    def setOpen(self, open: bool, animated=False) -> None:
         animated = animated and not self.animationDisabled()
         self._is_open = open
         revealed = float(open)

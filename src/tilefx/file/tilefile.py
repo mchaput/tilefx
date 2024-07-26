@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import ast
 import dataclasses
 import enum
 import re
 import textwrap
-from types import CodeType
 from typing import Any, Collection, Iterable, NamedTuple, NewType, Optional
-
-import jsonpathfx
 
 
 BLOCK_EXPR_START = "```"

@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import dataclasses
 import enum
 import math
 from typing import Iterable, Optional, Sequence, Tuple, TypeVar, Union
@@ -1054,40 +1052,3 @@ class BarChartGraphic(ChartGraphic):
 
             start += bar_breadth + space
 
-
-class TimelineChartGraphic(ChartGraphic):
-    @dataclasses.dataclass
-    class Point:
-        pos: float
-        color: converters.ColorSpec
-
-    @dataclasses.dataclass
-    class Range:
-        start: float
-        start_color: converters.ColorSpec
-        end: float
-        end_color: converters.ColorSpec
-
-    def __init__(self, parent: QtWidgets.QGraphicsItem = None):
-        super().__init__(parent)
-        self._items: \
-            list[TimelineChartGraphic.Point | TimelineChartGraphic.Range] = []
-        self._min = 0.0
-        self._max = 1.0
-        self._auto_max = True
-
-    @settable()
-    def setMinimumValue(self, value: float) -> None:
-        self._min = value
-
-    @settable()
-    def setMaximumValue(self, value: float) -> None:
-        self._max = value
-
-    @settable("auto_max", argtype=bool)
-    def setAutoMaximum(self, auto: bool) -> None:
-        self._auto_max = auto
-
-    # def paint(self, painter: QtGui.QPainter,
-    #           option: QtWidgets.QStyleOptionGraphicsItem,
-    #           widget: Optional[QtWidgets.QWidget] = None) -> None:

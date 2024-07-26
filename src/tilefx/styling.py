@@ -11,8 +11,8 @@ from . import converters
 class TextSize(enum.IntEnum):
     small_label = 10
     label = 12
-    tiny = 9
-    xsmall = 10
+    tiny = 10
+    xsmall = 11
     small = 12
     medium = 13
     large = 16

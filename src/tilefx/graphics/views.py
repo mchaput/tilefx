@@ -35,7 +35,7 @@ class DataItemPool:
     def __init__(self, name: str = None):
         self.name = name
         self._pool: list[core.Graphic] = []
-        self._item_template: dict[str, Any] = {}
+        self._item_template: dict[str, Any] | core.GraphicTemplate = {}
         self._prewarm_count = 0
         self._prewarm_batch_size = 50
         self._prewarm_batch_delay = 250
@@ -859,15 +859,15 @@ class DataListGraphic(DataLayoutGraphic):
         self._reuse_items = reuse
 
     @settable("item_template")
-    def setItemTemplate(self, template_data: dict[str, Any]):
+    def setItemTemplate(self, template_data: dict[str, Any] | core.GraphicTemplate):
         self._item_pool.setItemTemplate(template_data)
         self._modelReset()
 
-    def headingTemplate(self) -> dict[str, Any]:
+    def headingTemplate(self) -> dict[str, Any] | core.GraphicTemplate:
         return self._heading_template
 
     @settable("heading_template")
-    def setHeadingTemplate(self, template_data: dict[str, Any]) -> None:
+    def setHeadingTemplate(self, template_data: dict[str, Any] | core.GraphicTemplate) -> None:
         self._heading_template = template_data
         if self.hasSections():
             self._modelReset()
