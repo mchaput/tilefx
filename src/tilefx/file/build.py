@@ -113,7 +113,8 @@ def python_block_update_fn_name(ctx: BuildContext) -> str:
 def pythonBlockSetup(node: PythonBlock, ctx: BuildContext) -> list[str]:
     fn_name = python_block_update_fn_name(ctx)
     return [
-        f"def {fn_name}(obj, _data, _env) -> Any:"
+        f"def {fn_name}(obj, _data, _env) -> Any:",
+        "    _this = _data",
     ] + source_lines(node.source)
 
 
@@ -147,7 +148,7 @@ def jsonpathSetup(node: JsonpathNode, ctx: BuildContext) -> list[str]:
 
 def jsonpathValue(node: JsonpathNode, ctx: BuildContext) -> str:
     path_var = jsonpath_var_name(ctx)
-    return f"{path_var}.values(_data, _env)"
+    return f"{path_var}.values(_this, _env)"
 
 
 def literalValue(node: Literal, ctx: BuildContext) -> str:
@@ -243,6 +244,7 @@ def objectSetup(node: ObjectNode, ctx: BuildContext) -> list[str]:
     if dyns or node.items:
         lines.extend([
             f"def {update_fn_name}(obj, _data, _env) -> None:",
+            "    _this = _data",
             "    _env |= obj.localEnv()"
         ])
         if on_update and isinstance(on_update, PythonBlock):
@@ -328,12 +330,15 @@ def modelSetup(node: ModelNode, ctx: BuildContext) -> list[str]:
         if rows_node.dynamic():
             lines.extend([
                 f"def {update_fn_name}(model: DataModel, _data, _env) -> None:",
-                "    _row_objs = []"
+                "    _this = _data"
+                "    _row_objs = []",
             ])
             for n, p in cols:
                 lines.append(f"    _{n} = model.dataToID({n!r})")
+
             lines.extend([
                 f"    for row in {valueFor(rows_node, ctx)}:",
+                "        _this = row"
                 "        _row_objs.append({"
             ])
             for n, p in cols:

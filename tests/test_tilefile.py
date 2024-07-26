@@ -233,6 +233,21 @@ def test_parse_jsonpath():
     })
 
 
+def test_parse_jsonpath_this():
+    p = tilefile.parse("""
+    model "foo" {
+        rows: $.attrs
+        name: @.name
+        type: @.type
+    }
+    """)
+    assert p == tilefile.ModelNode("foo", {
+        "rows": tilefile.JsonpathNode("$.attrs"),
+        "name": tilefile.JsonpathNode("@.name"),
+        "type": tilefile.JsonpathNode("@.type")
+    })
+
+
 def test_parse_object():
     p = tilefile.parse("""
     obj surface {
