@@ -330,6 +330,60 @@ def test_object_values():
     })
 
 
+def test_parse_on_update():
+    p = tilefile.parse("""
+    obj surface {
+        ```
+        x = 10
+        ```
+        
+        y: 20
+        z: 40
+    }
+    """)
+    assert p == tilefile.ObjectNode("surface", None, {
+        "y": tilefile.Literal(20),
+        "z": tilefile.Literal(40)
+    }, on_update=tilefile.PythonBlock("x = 10"))
+
+    p = tilefile.parse("""
+    model "foo" {
+        ```
+        x = 10
+        ```
+
+        rows: $.attrs.*
+        y: `row.y`
+        z: `row.z`
+    }
+    """)
+    assert p == tilefile.ModelNode("foo", {
+        "rows": tilefile.JsonpathNode("$.attrs.*"),
+        "y": tilefile.PythonExpr("row.y"),
+        "z": tilefile.PythonExpr("row.z")
+    }, on_update=tilefile.PythonBlock("x = 10"))
+
+    with pytest.raises(tilefile.ParserError):
+        tilefile.parse("""
+        obj surface {
+            x: 20
+            ```
+            print('hello')
+            ```
+        }
+        """)
+
+    with pytest.raises(tilefile.ParserError):
+        tilefile.parse("""
+        obj surface {
+            ```
+            print('hello')
+            ```,
+            x: 10
+        }
+        """)
+
+
 def test_parse_module():
     p = tilefile.parse("""
     ```

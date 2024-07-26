@@ -216,7 +216,9 @@ def objectSetup(node: ObjectNode, ctx: BuildContext) -> list[str]:
         f"    _obj.setObjectName({name!r})"
     ])
     if on_setup and isinstance(on_setup, PythonBlock):
+        lines.append("    # on_setup")
         lines.extend(source_lines(on_setup.source))
+        lines.append("")
 
     dyns = [k for k, p in node.params.items() if p.dynamic()]
     statics = [k for k in node.params if k not in dyns]
@@ -246,6 +248,7 @@ def objectSetup(node: ObjectNode, ctx: BuildContext) -> list[str]:
         if on_update and isinstance(on_update, PythonBlock):
             lines.append("    # on_update")
             lines.extend(source_lines(on_update.source))
+            lines.append("")
 
         for k in dyns:
             p = node.params[k]
@@ -323,7 +326,6 @@ def modelSetup(node: ModelNode, ctx: BuildContext) -> list[str]:
 
     if rows_node:
         if rows_node.dynamic():
-            print("YYYY")
             lines.extend([
                 f"def {update_fn_name}(model: DataModel, _data, _env) -> None:",
                 "    _row_objs = []"
@@ -345,8 +347,6 @@ def modelSetup(node: ModelNode, ctx: BuildContext) -> list[str]:
         else:
             ctx.warns.append(("Rows property must be an expression or list",
                               rows_node))
-
-
 
     return lines
 

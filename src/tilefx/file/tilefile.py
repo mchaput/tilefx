@@ -15,6 +15,7 @@ BLOCK_EXPR_START = "```"
 BLOCK_EXPR_END = "```"
 LINE_EXPR_START = "`"
 LINE_EXPR_END = "`"
+ASSIGN_KEYWORD = "let"
 OBJECT_KEYWORD = "obj"
 TEMPLATE_KEYWORD = "template"
 MODEL_KEYWORD = "model"
@@ -192,6 +193,7 @@ class ObjectNode(AstNode):
     params: dict[str, AstNode]
     items: list = dataclasses.field(default_factory=list)
     is_template: bool = False
+    on_update: Optional[PythonBlock] = None
     type_name_start: int = dataclasses.field(default=-1, compare=False)
     obj_name_start: int = dataclasses.field(default=-1, compare=False)
     start: int = dataclasses.field(default=-1, compare=False)
@@ -202,6 +204,7 @@ class ObjectNode(AstNode):
 class ModelNode(AstNode):
     name: Optional[str]
     params: dict[str, AstNode]
+    on_update: Optional[PythonBlock] = None
     obj_name_start: int = dataclasses.field(default=-1, compare=False)
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
@@ -376,6 +379,7 @@ class Kind(enum.Enum):
     object = enum.auto()
     template = enum.auto()
     model = enum.auto()
+    assign = enum.auto()
 
 
 class Token(NamedTuple):
@@ -389,6 +393,7 @@ kw_to_obj_kind: dict[str, Kind] = {
     OBJECT_KEYWORD: Kind.object,
     TEMPLATE_KEYWORD: Kind.template,
     MODEL_KEYWORD: Kind.model,
+    ASSIGN_KEYWORD: Kind.assign,
 }
 kw_expr = re.compile(rf"({'|'.join(kw_to_obj_kind)})\s+")
 
@@ -593,6 +598,15 @@ class ObjectParselet(Parselet):
                 finished = True
                 break
 
+            if first and token.kind == Kind.block_expr:
+                out.on_update = PythonBlock(
+                    textwrap.dedent(token.payload).strip(),
+                    start=token.start, end=token.end
+                )
+                parser.skip_any(Kind.newline)
+                token = parser.consume()
+                continue
+
             if not first:
                 if token.kind == Kind.comma or token.kind == Kind.newline:
                     parser.skip_any(Kind.newline)
@@ -610,6 +624,7 @@ class ObjectParselet(Parselet):
                 items.append(self.parse_prefix(parser, token))
                 token = parser.consume()
                 continue
+
             elif token.kind in (Kind.name, Kind.string):
                 key = token.payload
             else:
@@ -622,6 +637,8 @@ class ObjectParselet(Parselet):
                              if isinstance(v, (ObjectNode, ModelNode)))
             else:
                 params[key] = val_node
+
+            # Get the next token and loop
             token = parser.consume()
 
         if finished:
