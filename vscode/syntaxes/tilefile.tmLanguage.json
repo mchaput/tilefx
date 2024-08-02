@@ -1,0 +1,187 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"patterns": [
+		{
+			"include": "#keywords"
+		},
+		{
+			"include": "#jsonpath"
+		},
+		{
+			"include": "#strings"
+		},
+		{
+			"include": "#triple_strings"
+		},
+		{
+			"include": "#variables"
+		},
+		{
+			"include": "#code"
+		},
+		{
+			"include": "#comment"
+		},
+		{
+			"include": "#number"
+		}
+	],
+	"repository": {
+		"keywords": {
+			"patterns": [
+				{
+					"match": "\\b(def|model)[\\t\\r\\n ]+([a-zA-Z_.][a-zA-Z0-9_.]*)?\\b",
+					"captures": {
+						"1": {
+							"name": "keyword.control.tilefile"
+						},
+						"2": {
+							"name": "entity.name.class"
+						}
+					}
+				},
+				{
+					"name": "keyword.control.tilefile",
+					"match": "\\b(let|var|def|over|style|template|model|reference|fn)\\b(?![:=])"
+				},
+				{
+					"name": "storage.modifier",
+					"match": "\\b(dyn)\\b(?![:=])"
+				},
+				{
+					"name": "keyword.operator.tilefile",
+					"match": "\\b(before|after|insert|delete)\\b"
+				},
+				{
+					"name": "keyword.import.tilefile",
+					"match": "\\#tilefile\\W[0-9]+.[0-9]"
+				},
+				{
+					"name": "constant.language.tilefile",
+					"match": "\\b(None|True|False|null|true|false)\\b"
+				}
+			]
+		},
+		"jsonpath": {
+			"patterns": [
+				{
+					"name": "string.interpolated.jsonpath",
+					"match": "[$@][.][^\\n]*"
+				}
+			]
+		},
+		"variables": {
+			"patterns": [
+				{
+					"name": "variable.name.tilefile",
+					"match": "[a-zA-Z_.][a-zA-Z0-9_.]*\\s*(?=[=])"
+				},
+				{
+					"name": "variable.parameter.tilefile",
+					"match": "[a-zA-Z_.][a-zA-Z0-9_.]*\\s*(?=[:])"
+				}
+			]
+		},
+		"number": {
+			"patterns": [
+				{
+					"name": "constant.numeric.float.tilefile",
+					"match": "((0(x|X)[0-9a-fA-F]*)|-?(([0-9]+\\.?[0-9]*)|(\\.[0-9]+))((e|E)(\\+|-)?[0-9]+)?)"
+				}
+			]
+		},
+		"code": {
+			"patterns": [
+				{
+					"begin": "```",
+					"end": "```",
+					"contentName": "meta.embedded.block.python",
+					"patterns": [
+						{
+							"include": "source.python"
+						}
+					]
+				},
+				{
+					"begin": "`",
+					"end": "`",
+					"contentName": "meta.embedded.block.python",
+					"patterns": [
+						{
+							"include": "source.python"
+						}
+					]
+				}
+			]
+		},
+		"strings": {
+			"patterns": [
+				{
+					"name": "string.quoted.double.tilefile",
+					"begin": "\"",
+					"patterns": [
+						{
+							"name": "constant.character.escape.tilefile",
+							"match": "\\\\."
+						}
+					],
+					"end": "\""
+				},
+				{
+					"name": "string.quoted.single.tilefile",
+					"begin": "'",
+					"patterns": [
+						{
+							"name": "constant.character.escape.tilefile",
+							"match": "\\\\."
+						}
+					],
+					"end": "'"
+				}
+			]
+		},
+		"triple_strings": {
+			"patterns": [
+				{
+					"name": "string.quoted.triple.tilefile",
+					"begin": "((\\\"\\\"\\\")|('''))",
+					"beginCaptures": {
+						"1": {
+							"name": "punctuation.definition.string"
+						}
+					},
+					"patterns": [
+						{
+							"name": "constant.character.escape.tilefile",
+							"match": "\\\\."
+						}
+					],
+					"end": "(\\1)",
+					"endCaptures": {
+						"1": {
+							"name": "punctuation.definition.string"
+						}
+					}
+				}
+			]
+		},
+		"comment": {
+			"patterns": [
+				{
+					"begin": "(^[ \\t]+)?((#)(?:\\s*((@)internal)(?=\\s|$))?)",
+					"beginCaptures": {
+						"1": {
+							"name": "punctuation.whitespace.comment.leading.tilefile"
+						},
+						"2": {
+							"name": "comment.line.hash.tilefile"
+						}
+					},
+					"end": "(?=^)",
+					"contentName": "comment.line.hash.tilefile"
+				}
+			]
+		}
+	},
+	"scopeName": "source.tilefile"
+}

@@ -1,0 +1,37 @@
+{
+    "name": "tilefile",
+    "displayName": "tilefile",
+    "description": "Support for TileFX configuration files",
+    "version": "0.0.1",
+    "engines": {
+        "vscode": "^1.91.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "tilefile",
+                "aliases": [
+                    "tilefile",
+                    "tilefile"
+                ],
+                "extensions": [
+                    ".tilefile"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "tilefile",
+                "scopeName": "source.tilefile",
+                "path": "./syntaxes/tilefile.tmLanguage.json",
+                "embeddedLanguages": {
+                    "meta.embedded.block.python": "python"
+                }
+            }
+        ]
+    }
+}

@@ -4,28 +4,42 @@ import dataclasses
 import enum
 import re
 import textwrap
-from typing import Any, Collection, Iterable, NamedTuple, NewType, Optional
+from typing import (Any, Collection, Iterable, NamedTuple, NewType, Optional,
+                    Sequence, TypeVar)
 
 
+ASSIGN_EQ_OP = "="
+DICT_ITEM_OP = ":"
 BLOCK_EXPR_START = "```"
 BLOCK_EXPR_END = "```"
 LINE_EXPR_START = "`"
 LINE_EXPR_END = "`"
-ASSIGN_KEYWORD = "let"
-OBJECT_KEYWORD = "obj"
+LET_KEYWORD = "let"
+VAR_KEYWORD = "var"
+DYN_KEYWORD = "dyn"
+OBJECT_KEYWORD = "def"
+OVER_KEYWORD = "over"
+STYLE_KEYWORD = "style"
 TEMPLATE_KEYWORD = "template"
 MODEL_KEYWORD = "model"
+REF_KEYWORD = "reference"
+FUNC_KEYWORD = "fn"
+BEFORE_KEYWORD = "before"
+AFTER_KEYWORD = "after"
+INSERT_KEYWORD = "insert"
 
 
 class ErrType(enum.Enum):
+    system = enum.auto()
     syntax = enum.auto()
     bracket = enum.auto()
     string = enum.auto()
     expr = enum.auto()
-    dict_key = enum.auto()
+    item = enum.auto()
     type_name = enum.auto()
     obj_name = enum.auto()
     obj_open_brace = enum.auto()
+    obj_member = enum.auto()
 
 
 class ParserError(Exception):
@@ -65,7 +79,28 @@ def coords(text: str, pos: int) -> str:
 comment_expr = re.compile(r"#([^\r\n]+)(\r\n|\r|\n)")
 name_expr = re.compile(r"(\w|[.])+")
 line_comment_expr = re.compile(r"#[^\r\n]*")
-number_expr = re.compile(r"(-?\d+([.]\d*(e\d+)?)?)|([.]\d+([eE]\d*)?)")
+number_expr = re.compile(r"""
+(  # Hex integer
+    0[xX][0-9a-fA-F]*
+)  
+|
+(
+    [+-]?  # Sign
+    (
+        (  # Digits -> decimal -> digits
+            [0-9]+
+            ([.][0-9]*)?
+        )
+        |  # or...
+        (  # Decimal -> digitsl
+            [.][0-9]+
+        )
+    )
+    (  # ...optinally followed by exponent
+        [eE][-+]?[0-9]+
+    )?
+)
+    """,re.VERBOSE)
 sep_expr = re.compile(r"[ \t]*,?[ \t]*(\r\n|\r|\n)")
 bs_x_expr = re.compile(r"\\x([a-fA-F0-9]{2})")
 bs_u_expr = re.compile(r"\\u([a-fA-F0-9]{4})")
@@ -103,6 +138,61 @@ endbrackets = frozenset(brackets.values())
 ComputedKey = NewType("ComputedKey", str)
 
 
+class Kind(enum.Enum):
+    eof = enum.auto()
+    newline = enum.auto()
+    string = enum.auto()
+    number = enum.auto()
+    literal = enum.auto()
+    line_expr = enum.auto()
+    block_expr = enum.auto()
+    env_var = enum.auto()
+    comma = enum.auto()
+    colon = enum.auto()
+    assign_eq = enum.auto()
+    open_brace = enum.auto()
+    close_brace = enum.auto()
+    open_paren = enum.auto()
+    close_paren = enum.auto()
+    open_square = enum.auto()
+    close_square = enum.auto()
+    jsonpath = enum.auto()
+    keyword = enum.auto()
+    name = enum.auto()
+    value_expr = enum.auto()
+
+    object = enum.auto()
+    over = enum.auto()
+    style = enum.auto()
+    template = enum.auto()
+    model = enum.auto()
+    let = enum.auto()
+    var = enum.auto()
+    dyn = enum.auto()
+    reference = enum.auto()
+    func = enum.auto()
+
+    before = enum.auto()
+    after = enum.auto()
+    insert = enum.auto()
+
+class Namespace(dict):
+    def __repr__(self):
+        return f"<Namespace {super().__repr__()}>"
+
+    def __getattr__(self, name: str) -> Any:
+        return self[name]
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self[name] = value
+
+    def __or__(self, other):
+        return Namespace(super().__or__(other))
+
+    def copy(self) -> Namespace:
+        return Namespace(super().copy())
+
+
 class AstNode:
     start = -1
     end = -1
@@ -110,22 +200,50 @@ class AstNode:
     def dynamic(self) -> bool:
         return False
 
+    def assumes_name(self) -> bool:
+        return False
+
 
 @dataclasses.dataclass
 class ModuleNode(AstNode):
-    value: list[AstNode]
+    items: list[AstNode]
+    name: Optional[str] = None
+    styles: Namespace = dataclasses.field(default_factory=Namespace)
 
     @property
     def start(self) -> int:
-        return self.value[0].start if self.value else -1
+        return self.items[0].start if self.items else -1
 
     @property
     def end(self) -> int:
-        return self.value[-1].end if self.value else -1
+        return self.items[-1].end if self.items else -1
 
 
 @dataclasses.dataclass
-class PythonExpr(AstNode):
+class PythonAstNode(AstNode):
+    source: str
+    name: Optional[str] = dataclasses.field(default=None, compare=False)
+    start: int = dataclasses.field(default=-1, compare=False)
+    end: int = dataclasses.field(default=-1, compare=False)
+
+    def assumes_name(self) -> bool:
+        return True
+
+
+@dataclasses.dataclass
+class PythonExpr(PythonAstNode):
+    def dynamic(self) -> bool:
+        return True
+
+
+@dataclasses.dataclass
+class PythonBlock(PythonAstNode):
+    def dynamic(self) -> bool:
+        return True
+
+
+@dataclasses.dataclass
+class JsonpathNode(PythonAstNode):
     source: str
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
@@ -133,31 +251,7 @@ class PythonExpr(AstNode):
     def dynamic(self) -> bool:
         return True
 
-
-@dataclasses.dataclass
-class PythonBlock(AstNode):
-    source: str
-    start: int = dataclasses.field(default=-1, compare=False)
-    end: int = dataclasses.field(default=-1, compare=False)
-
-    def dynamic(self) -> bool:
-        return True
-
-
-@dataclasses.dataclass
-class StaticPythonExpr(AstNode):
-    source: str
-    start: int = dataclasses.field(default=-1, compare=False)
-    end: int = dataclasses.field(default=-1, compare=False)
-
-
-@dataclasses.dataclass
-class JsonpathNode(AstNode):
-    source: str
-    start: int = dataclasses.field(default=-1, compare=False)
-    end: int = dataclasses.field(default=-1, compare=False)
-
-    def dynamic(self) -> bool:
+    def assumes_name(self) -> bool:
         return True
 
 
@@ -169,15 +263,33 @@ class Literal(AstNode):
 
 
 @dataclasses.dataclass
+class FuncNode(AstNode):
+    expr: PythonAstNode
+    start: int = dataclasses.field(default=-1, compare=False)
+    end: int = dataclasses.field(default=-1, compare=False)
+
+    def dynamic(self) -> bool:
+        return True
+
+
+@dataclasses.dataclass
+class RefNode(AstNode):
+    ref: str
+    items: list[AstNode] = dataclasses.field(default_factory=list)
+    start: int = dataclasses.field(default=-1, compare=False)
+    end: int = dataclasses.field(default=-1, compare=False)
+
+
+@dataclasses.dataclass
 class DictNode(AstNode):
-    value: dict[str | ComputedKey, AstNode]
+    values: dict[str | ComputedKey, AstNode]
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
 
 
 @dataclasses.dataclass
 class ListNode(AstNode):
-    value: list[AstNode]
+    values: list[AstNode]
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
 
@@ -186,24 +298,48 @@ class ListNode(AstNode):
 class ObjectNode(AstNode):
     type_name: str
     name: Optional[str]
-    params: dict[str, AstNode]
-    items: list = dataclasses.field(default_factory=list)
+    items: list[AstNode] = dataclasses.field(default_factory=list)
     is_template: bool = False
-    on_update: Optional[PythonBlock] = None
-    type_name_start: int = dataclasses.field(default=-1, compare=False)
-    obj_name_start: int = dataclasses.field(default=-1, compare=False)
+    options: dict[str, AstNode] = dataclasses.field(default_factory=dict)
+    type_start: int = dataclasses.field(default=-1, compare=False)
+    name_start: int = dataclasses.field(default=-1, compare=False)
+    start: int = dataclasses.field(default=-1, compare=False)
+    end: int = dataclasses.field(default=-1, compare=False)
+
+    def dynamic(self) -> bool:
+        return any(it.dynamic() for it in self.items)
+
+
+@dataclasses.dataclass
+class InsertionNode(AstNode):
+    kind: Kind
+    arg: str | int
+    obj: ObjectNode
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
 
 
 @dataclasses.dataclass
-class ModelNode(AstNode):
+class SimpleObjectNode(AstNode):
     name: Optional[str]
-    params: dict[str, AstNode]
-    on_update: Optional[PythonBlock] = None
-    obj_name_start: int = dataclasses.field(default=-1, compare=False)
+    items: list[AstNode] = dataclasses.field(default_factory=list)
+    options: dict[str, AstNode] = dataclasses.field(default_factory=dict)
+    name_start: int = dataclasses.field(default=-1, compare=False)
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
+
+
+class OverNode(SimpleObjectNode):
+    pass
+
+
+class StyleNode(SimpleObjectNode):
+    pass
+
+
+class ModelNode(SimpleObjectNode):
+    def dynamic(self) -> bool:
+        return True
 
 
 @dataclasses.dataclass
@@ -211,6 +347,33 @@ class EnvVarNode(AstNode):
     value: str
     start: int = dataclasses.field(default=-1, compare=False)
     end: int = dataclasses.field(default=-1, compare=False)
+
+    def dynamic(self) -> bool:
+        return True
+
+
+@dataclasses.dataclass
+class Assign(AstNode):
+    name: str
+    value: PythonAstNode | Literal | DictNode | ListNode
+    dyn: bool = True
+    start: int = dataclasses.field(default=-1, compare=False)
+    end: int = dataclasses.field(default=-1, compare=False)
+
+    def dynamic(self) -> bool:
+        return self.dyn
+
+
+@dataclasses.dataclass
+class Prop(AstNode):
+    name: str | ComputedKey
+    value: AstNode
+    dyn: bool = False
+    start: int = dataclasses.field(default=-1, compare=False)
+    end: int = dataclasses.field(default=-1, compare=False)
+
+    def dynamic(self) -> bool:
+        return self.dyn
 
 
 def lex_string_literal(text: str, pos: int, allow_multiline_strings=True
@@ -280,10 +443,10 @@ def lex_string_literal(text: str, pos: int, allow_multiline_strings=True
 #         raise ParserError(f"Expected string", text, pos)
 
 
-def parse_expression(text: str, pos: int,
-                     end_chars: Collection[str] = "\r\n",
-                     newline_is_error=False, allow_multiline_strings=True
-                     ) -> tuple[str, int]:
+def lex_expression(text: str, pos: int,
+                   end_chars: Collection[str] = "\r\n",
+                   newline_is_error=False, allow_multiline_strings=True
+                   ) -> tuple[str, int]:
     start = pos
     stack: list[tuple[str, pos]] = []
     length = len(text)
@@ -328,9 +491,9 @@ def parse_expression(text: str, pos: int,
 
 
 def parse_line_expr(text: str, pos: int) -> tuple[str, int]:
-    expr_str, end_pos = parse_expression(text, pos, end_chars="\r\n`",
-                                         newline_is_error=True,
-                                         allow_multiline_strings=False)
+    expr_str, end_pos = lex_expression(text, pos, end_chars="\r\n`",
+                                       newline_is_error=True,
+                                       allow_multiline_strings=False)
     if end_pos < len(text) and text[end_pos] == "`":
         return expr_str, end_pos + 1
     else:
@@ -350,34 +513,6 @@ def lex_to_end_string(text: str, pos: int, end_str: str) -> tuple[str, int]:
 # In the class names below "prefix" means "prefix or standalone" and
 # "infix" means "not prefix" (includes postfix and "mixfix" (e.g. ?:))
 
-class Kind(enum.Enum):
-    eof = enum.auto()
-    newline = enum.auto()
-    string = enum.auto()
-    number = enum.auto()
-    literal = enum.auto()
-    line_expr = enum.auto()
-    block_expr = enum.auto()
-    value_expr = enum.auto()
-    env_var = enum.auto()
-    comma = enum.auto()
-    colon = enum.auto()
-    open_brace = enum.auto()
-    close_brace = enum.auto()
-    open_paren = enum.auto()
-    close_paren = enum.auto()
-    open_square = enum.auto()
-    close_square = enum.auto()
-    jsonpath = enum.auto()
-    keyword = enum.auto()
-    name = enum.auto()
-
-    object = enum.auto()
-    template = enum.auto()
-    model = enum.auto()
-    assign = enum.auto()
-
-
 class Token(NamedTuple):
     kind: Kind
     payload: Any
@@ -385,18 +520,32 @@ class Token(NamedTuple):
     end: int
 
 
-kw_to_obj_kind: dict[str, Kind] = {
+kw_to_kind: dict[str, Kind] = {
     OBJECT_KEYWORD: Kind.object,
+    OVER_KEYWORD: Kind.over,
+    STYLE_KEYWORD: Kind.style,
     TEMPLATE_KEYWORD: Kind.template,
     MODEL_KEYWORD: Kind.model,
-    ASSIGN_KEYWORD: Kind.assign,
+    LET_KEYWORD: Kind.let,
+    VAR_KEYWORD: Kind.var,
+    DYN_KEYWORD: Kind.dyn,
+    REF_KEYWORD: Kind.reference,
+    FUNC_KEYWORD: Kind.func,
+    BEFORE_KEYWORD: Kind.before,
+    AFTER_KEYWORD: Kind.after,
+    INSERT_KEYWORD: Kind.insert,
 }
-kw_expr = re.compile(rf"({'|'.join(kw_to_obj_kind)})\s+")
+kw_expr = re.compile(rf"({'|'.join(kw_to_kind)})\s+(?![:=])")
+
+char_to_kind: dict[str, Kind] = {
+    ",": Kind.comma,
+    ASSIGN_EQ_OP: Kind.assign_eq,
+}
 
 
 def lex(text: str, pos=0) -> Iterable[Token]:
-    dict_depth = 0
-    prev_kind: Optional[Kind] = None
+    bracket_stack: list[Token] = []
+    allow_expr = False
     while pos < len(text):
         start = pos
         char = text[pos]
@@ -407,20 +556,21 @@ def lex(text: str, pos=0) -> Iterable[Token]:
             pos = m.end()
             continue
         elif m := newline_expr.match(text, pos):
-            out = Token(Kind.newline, "\n", pos, m.end())
+            yield Token(Kind.newline, "\n", pos, m.end())
             pos = m.end()
         elif text.startswith(BLOCK_EXPR_START, pos):
-            block, end_pos = lex_to_end_string(text, pos + len(BLOCK_EXPR_START),
-                                               BLOCK_EXPR_END)
-            out = Token(Kind.block_expr, block, pos, end_pos)
+            block, end_pos = lex_to_end_string(
+                text, pos + len(BLOCK_EXPR_START), BLOCK_EXPR_END
+            )
+            yield Token(Kind.block_expr, block, pos, end_pos)
             pos = end_pos
         elif text.startswith(LINE_EXPR_START, pos):
             line, end_pos = parse_line_expr(text, pos + len(LINE_EXPR_START))
-            out = Token(Kind.line_expr, line, pos, end_pos)
+            yield Token(Kind.line_expr, line, pos, end_pos)
             pos = end_pos
         elif char in "'\"":
             string, end_pos = lex_string_literal(text, pos)
-            out = Token(Kind.string, string, pos, end_pos)
+            yield Token(Kind.string, string, pos, end_pos)
             pos = end_pos
         elif m := number_expr.match(text, pos):
             num_str = m.group(0)
@@ -428,63 +578,91 @@ def lex(text: str, pos=0) -> Iterable[Token]:
                 value = float(num_str)
             else:
                 value = int(num_str)
-            out = Token(Kind.literal, value, pos, m.end())
+            yield Token(Kind.number, value, pos, m.end())
             pos = m.end()
         elif m := literal_expr.match(text, pos):
-            out = Token(Kind.literal, literals[m.group(0)], pos, m.end())
+            yield Token(Kind.literal, literals[m.group(0)], pos, m.end())
             pos = m.end()
         elif m := kw_expr.match(text, pos):
-            out = Token(kw_to_obj_kind[m.group(1)], m.group(1), pos, m.end())
+            yield Token(kw_to_kind[m.group(1)], m.group(1), pos, m.end())
             pos = m.end()
-        elif char == ",":
-            out = Token(Kind.comma, ",", pos, pos + 1)
-            pos += 1
-        elif char == ":":
-            out = Token(Kind.colon, ":", pos, pos + 1)
-            pos += 1
         elif m := env_var_expr.match(text, pos):
-            out = Token(Kind.env_var, m.group(1), pos, m.end())
+            yield Token(Kind.env_var, m.group(1), pos, m.end())
             pos = m.end()
+        elif char == DICT_ITEM_OP:
+            yield Token(Kind.colon, char, pos, pos + 1)
+            pos += 1
+            if bracket_stack and bracket_stack[-1].kind == Kind.open_brace:
+                allow_expr = True
+                continue
+        elif char in char_to_kind:
+            yield Token(char_to_kind[char], char, pos, pos + 1)
+            pos += 1
         elif char in "$@":
-            path, end_pos = parse_expression(text, pos)
-            out = Token(Kind.jsonpath, path, pos, pos + 1)
+            path, end_pos = lex_expression(text, pos)
+            yield Token(Kind.jsonpath, path, pos, pos + 1)
             pos = end_pos
         elif char == "{":
-            out = Token(Kind.open_brace, "{", pos, pos + 1)
-            dict_depth += 1
+            out = Token(Kind.open_brace, char, pos, pos + 1)
+            yield out
+            bracket_stack.append(out)
             pos += 1
         elif char == "}":
-            out = Token(Kind.close_brace, "}", pos, pos + 1)
-            dict_depth -= 1
+            out = Token(Kind.close_brace, char, pos, pos + 1)
+            yield out
+            if bracket_stack and bracket_stack[-1].kind == Kind.open_brace:
+                bracket_stack.pop()
+            else:
+                raise ParserError(ErrType.bracket, "Unmatched }", text,
+                                  token=out)
             pos += 1
         elif char == "[":
-            out = Token(Kind.open_square, "[", pos, pos + 1)
+            out = Token(Kind.open_square, char, pos, pos + 1)
+            yield out
+            bracket_stack.append(out)
             pos += 1
         elif char == "]":
-            out = Token(Kind.close_square, "]", pos, pos + 1)
+            out = Token(Kind.close_square, char, pos, pos + 1)
+            yield out
+            if bracket_stack and bracket_stack[-1].kind == Kind.open_square:
+                bracket_stack.pop()
+            else:
+                raise ParserError(ErrType.bracket, "Unmatched ]", text,
+                                  token=out)
             pos += 1
-        elif char == "(":
-            expr, end_pos = parse_expression(
-                text, pos + 1, end_chars=")", newline_is_error=False
-            )
-            out = Token(Kind.value_expr, expr, pos + 1, end_pos)
-            pos = end_pos + 1
-        elif dict_depth and prev_kind == Kind.colon:
-            expr, end_pos = parse_expression(text, pos, end_chars="\r\n,")
-            out = Token(Kind.value_expr, expr, pos, end_pos)
+        elif allow_expr:
+            expr, end_pos = lex_expression(text, pos, end_chars="\r\n,}")
+            yield Token(Kind.value_expr, expr, pos, end_pos)
             pos = end_pos
+        elif char == "(":
+            out = Token(Kind.open_paren, char, pos, pos + 1)
+            yield out
+            bracket_stack.append(out)
+            pos += 1
+        elif char == ")":
+            out = Token(Kind.close_paren, char, pos, pos + 1)
+            yield out
+            if bracket_stack and bracket_stack[-1].kind == Kind.open_paren:
+                bracket_stack.pop()
+            else:
+                raise ParserError(ErrType.bracket, "Unmatched )", text,
+                                  token=out)
+            pos += 1
         elif m := name_expr.match(text, pos):
-            out = Token(Kind.name, m.group(0), pos, m.end())
+            yield Token(Kind.name, m.group(0), pos, m.end())
             pos = m.end()
         else:
-            raise ParserError(ErrType.syntax, "Syntax error: {char}",
+            raise ParserError(ErrType.syntax, f"Syntax error: {char}",
                               text, pos)
-
-        yield out
-        prev_kind = out.kind
+        allow_expr = False
 
         if pos <= start:
             raise Exception(f"Pos error {start} -> {pos}")
+
+    if bracket_stack:
+        token = bracket_stack[-1]
+        raise ParserError(ErrType.bracket, f"Unclosed {token.payload}",
+                          text, token=token)
 
 
 class Parselet:
@@ -499,49 +677,14 @@ class Parselet:
         raise NotImplementedError
 
 
-class DictParselet(Parselet):
-    def parse_prefix(self, parser: Parser, open_token: Token) -> AstNode:
-        d: dict[str, AstNode] = {}
-        parser.skip_any(Kind.newline)
-        token = parser.consume()
-        first = True
-        while token.kind != Kind.eof:
-            if token.kind == Kind.close_brace:
-                return DictNode(d, start=open_token.end, end=token.start)
-
-            if not first:
-                if token.kind == Kind.comma or token.kind == Kind.newline:
-                    parser.skip_any(Kind.newline)
-                    token = parser.consume()
-                else:
-                    raise parser.expected(ErrType.syntax, "comma or newline",
-                                          token)
-            first = False
-
-            if token.kind == Kind.close_brace:
-                return DictNode(d, start=open_token.end, end=token.start)
-            elif token.kind in (Kind.name, Kind.string):
-                key = token.payload
-            elif token.kind == Kind.value_expr:
-                key = ComputedKey(token.payload)
-            else:
-                raise parser.expected(ErrType.dict_key, "dictionary key", token)
-
-            parser.consume(Kind.colon, ErrType.dict_key)
-            parser.skip_any(Kind.newline)
-            value = parser.expression()
-            d[key] = value
-            token = parser.consume()
-
-        raise parser.err(ErrType.bracket, "Unclosed brace", open_token)
-
-
 class ListParselet(Parselet):
-    def parse_prefix(self, parser: Parser, open_token: Token) -> AstNode:
+    @classmethod
+    def parse_prefix(cls, parser: Parser, open_token: Token) -> AstNode:
 
         ls: list[AstNode] = []
         first = True
         while parser.current().kind != Kind.eof:
+            parser.skip_any(Kind.newline)
             if close_token := parser.optional(Kind.close_square):
                 return ListNode(ls, start=open_token.end, end=close_token.start)
 
@@ -562,127 +705,322 @@ class ListParselet(Parselet):
         raise parser.err(ErrType.bracket, "Unclosed square bracket", open_token)
 
 
-class ObjectParselet(Parselet):
-    def parse_prefix(self, parser: Parser, kw_token: Token) -> ObjectNode:
-        obj_kind = kw_token.kind
-        params: dict[str, AstNode] = {}
-        items: Optional[list[ObjectNode]] = []
-        if obj_kind in (Kind.object, Kind.template):
-            type_token = parser.consume(Kind.name, ErrType.type_name)
-            type_name = type_token.payload
-            out = ObjectNode(type_name, None, params, items,
-                             is_template=obj_kind == Kind.template,
-                             type_name_start=type_token.start)
-        elif obj_kind == Kind.model:
-            out = ModelNode(None, params)
+def skip_sep(parser: Parser, close_kind: Kind) -> None:
+    cur_kind = parser.current().kind
+    if cur_kind == close_kind:
+        return
+
+    if cur_kind == Kind.comma or cur_kind == Kind.newline:
+        parser.optional(Kind.comma)
+        parser.skip_any(Kind.newline)
+    else:
+        raise parser.expected(ErrType.syntax, "comma or newline",
+                              parser.current())
+
+
+def take_key(parser: Parser, op=Kind.colon) -> tuple[str | ComputedKey, int]:
+    key_token = parser.consume()
+    if key_token.kind in (Kind.name, Kind.string):
+        key = key_token.payload
+    elif key_token.kind == Kind.value_expr:
+        key = ComputedKey(key_token.payload)
+    else:
+        raise parser.expected(ErrType.item, "dictionary key", key_token)
+    parser.consume(op, ErrType.item)
+    parser.skip_any(Kind.newline)
+    return key, key_token.start
+
+
+def take_object_options(parser: Parser) -> tuple[dict[str, AstNode], int]:
+    parser.skip_any(Kind.newline)
+    open_token = parser.consume(Kind.open_paren, ErrType.bracket)
+    parser.skip_any(Kind.newline)
+    options: dict[str, AstNode] = {}
+    first = True
+    while parser.current().kind != Kind.eof:
+        if not first:
+            skip_sep(parser, Kind.close_paren)
+        first = False
+        cur_kind = parser.current().kind
+        if cur_kind == Kind.close_paren:
+            close_token = parser.consume()
+            return options, close_token.end
+        elif cur_kind == Kind.name:
+            key, key_start = take_key(parser, Kind.assign_eq)
+            expr_token = parser.current()
+            expr_node = parser.expression()
+            if not isinstance(expr_node, (Literal, PythonExpr, JsonpathNode)):
+                raise parser.err(ErrType.syntax, "Invalid option value",
+                                 expr_token)
+            options[key] = expr_node
+
+    raise parser.err(ErrType.bracket, "Unclosed option list", open_token)
+
+
+def take_object_params(parser: Parser, allowed_types: Sequence[type[AstNode]]
+                       ) -> tuple[list[AstNode], int]:
+    parser.skip_any(Kind.newline)
+    open_token = parser.consume(Kind.open_brace, ErrType.obj_open_brace)
+    parser.skip_any(Kind.newline)
+    items: list[AstNode] = []
+    first = True
+    while parser.current().kind != Kind.eof:
+        # if first:
+        #     parser.skip_any(Kind.newline)
+        #     if docstring_token := parser.optional(Kind.string):
+        #         items.append(Prop("doc", Literal(docstring_token.payload)))
+        #         parser.skip_any(Kind.newline)
+
+        if not first:
+            skip_sep(parser, Kind.close_brace)
+        first = False
+
+        cur_kind = parser.current().kind
+        if cur_kind == Kind.close_brace:
+            close_token = parser.consume()
+            return items, close_token.end
+        elif cur_kind == Kind.name or cur_kind == Kind.string:
+            key, key_start = take_key(parser)
+            expr_node = parser.expression()
+            if expr_node.assumes_name():
+                expr_node.name = key
+            items.append(Prop(key, expr_node, start=key_start))
         else:
-            raise Exception(f"Unknown keyword {obj_kind} {kw_token.payload}")
+            start_token = parser.current()
+            obj_node = parser.expression()
+            if isinstance(obj_node, Prop) or type(obj_node) in allowed_types:
+                items.append(obj_node)
+            else:
+                raise parser.err(ErrType.obj_member,
+                                 f"Can't use {start_token.payload} here",
+                                 start_token)
 
-        out.start = kw_token.start
-        name_token = parser.optional(Kind.string)
-        out.name = name_token.payload if name_token else None
-        out.obj_name_start = name_token.start if name_token else -1
+    raise parser.err(ErrType.bracket, "Unclosed parameters", open_token)
 
+
+class DictParselet(Parselet):
+    @classmethod
+    def parse_prefix(cls, parser: Parser, open_token: Token) -> DictNode:
+        values: dict[str | ComputedKey, AstNode] = {}
         parser.skip_any(Kind.newline)
-        open_token = parser.consume(Kind.open_brace, ErrType.obj_open_brace)
-        parser.skip_any(Kind.newline)
-        token = parser.consume()
         first = True
-        finished = False
-        while token.kind != Kind.eof:
-            if token.kind == Kind.close_brace:
-                finished = True
-                break
-
-            if first and token.kind == Kind.block_expr:
-                out.on_update = PythonBlock(
-                    textwrap.dedent(token.payload).strip(),
-                    start=token.start, end=token.end
-                )
-                parser.skip_any(Kind.newline)
-                token = parser.consume()
-                continue
-
+        while parser.current().kind != Kind.eof:
             if not first:
-                if token.kind == Kind.comma or token.kind == Kind.newline:
-                    parser.skip_any(Kind.newline)
-                else:
-                    raise parser.expected(ErrType.syntax, "comma or newline",
-                                          token)
-                token = parser.consume()
+                skip_sep(parser, Kind.close_brace)
             first = False
+            if close_token := parser.optional(Kind.close_brace):
+                return DictNode(values, start=open_token.start,
+                                end=close_token.end)
 
-            if token.kind == Kind.close_brace:
-                finished = True
-                break
+            key, _ = take_key(parser)
+            values[key] = parser.expression()
 
-            elif token.kind in (Kind.object, Kind.template, Kind.model):
-                items.append(self.parse_prefix(parser, token))
-                token = parser.consume()
-                continue
+        raise parser.err(ErrType.bracket, "Unclosed brace", open_token)
 
-            elif token.kind in (Kind.name, Kind.string):
-                key = token.payload
-            else:
-                raise parser.expected(ErrType.dict_key, "dictionary key", token)
 
-            parser.consume(Kind.colon, ErrType.dict_key)
-            val_node = parser.expression()
-            if key == "items" and isinstance(val_node, ListNode):
-                items.extend(v for v in val_node.value
-                             if isinstance(v, (ObjectNode, ModelNode)))
-            else:
-                params[key] = val_node
+class ObjectParselet(DictParselet):
+    @classmethod
+    def parse_prefix(cls, parser: Parser, kw_token: Token
+                     ) -> ObjectNode:
+        is_template = kw_token.kind == Kind.template
+        type_token = parser.consume(Kind.name, ErrType.type_name)
+        obj = ObjectNode(type_token.payload, None, is_template=is_template,
+                         type_start=type_token.start,
+                         start=kw_token.start)
+        if name_token := parser.optional(Kind.string):
+            obj.name = name_token.payload
+            obj.name_start = name_token.start
 
-            # Get the next token and loop
-            token = parser.consume()
+        if parser.current().kind == Kind.open_paren:
+            obj.options, _ = take_object_options(parser)
 
-        if finished:
-            out.end = token.start
-            return out
+        obj.items, obj.end = take_object_params(parser, (
+            ObjectNode, ModelNode, StyleNode, Assign
+        ))
+        return obj
+
+
+class OverParselet(Parselet):
+    @classmethod
+    def parse_prefix(cls, parser: Parser, kw_token: Token) -> OverNode:
+        name_token = parser.consume(Kind.string)
+        obj = OverNode(name_token.payload, name_start=name_token.start)
+
+        if parser.current().kind == Kind.open_paren:
+            obj.options, _ = take_object_options(parser)
+
+        obj.items, obj.end = take_object_params(parser, (
+            InsertionNode, ObjectNode, ModelNode, StyleNode, Assign
+        ))
+        return obj
+
+
+class InsertionParselet(Parselet):
+    @classmethod
+    def parse_prefix(cls, parser: Parser, kw_token: Token) -> InsertionNode:
+        kind = kw_token.kind
+        if kind == Kind.before or kind == Kind.after:
+            arg = parser.consume(Kind.string)
+        elif kind == Kind.insert:
+            arg = parser.consume(Kind.number)
         else:
-            raise parser.err(ErrType.bracket, "Unclosed brace", open_token)
+            raise Exception("Unknown insertion kind")
+        next_token = parser.current()
+        obj = parser.expression()
+        if not isinstance(obj, ObjectNode):
+            raise parser.expected(ErrType.syntax, OBJECT_KEYWORD, next_token)
+        return InsertionNode(kind, arg.payload, obj, start=kw_token.start,
+                             end=obj.end)
+
+
+class SimpleObjectParselet(Parselet):
+    def __init__(self, cls: type[SimpleObjectNode], name_required=False):
+        assert issubclass(cls, SimpleObjectNode)
+        self._cls = cls
+        self._name_required = name_required
+
+    def parse_prefix(self, parser: Parser, kw_token: Token) -> AstNode:
+        if self._name_required:
+            name_token = parser.consume(Kind.string)
+            name = name_token.payload
+            name_start = name_token.start
+        elif name_token := parser.optional(Kind.string):
+            name = name_token.payload
+            name_start = name_token.start
+        else:
+            name = None
+            name_start = -1
+        obj = self._cls(name, name_start=name_start, start=kw_token.start)
+
+        if parser.current().kind == Kind.open_paren:
+            obj.options, _ = take_object_options(parser)
+
+        obj.items, obj.end = take_object_params(parser, (
+            Assign,
+        ))
+        return obj
 
 
 class LiteralParselet(Parselet):
-    def parse_prefix(self, parser: Parser, token: Token) -> AstNode:
+    @classmethod
+    def parse_prefix(cls, parser: Parser, token: Token) -> AstNode:
         return Literal(token.payload)
 
 
+class EnvVarParselet(Parselet):
+    @classmethod
+    def parse_prefix(cls, parser: Parser, token: Token) -> EnvVarNode:
+        return EnvVarNode(token.payload, start=token.start, end=token.end)
+
+
 class ExprParselet(Parselet):
-    def parse_prefix(self, parser: Parser, token: Token) -> AstNode:
-        if token.kind == Kind.value_expr or token.kind == Kind.name:
-            return StaticPythonExpr(token.payload)
-        elif token.kind == Kind.env_var:
-            return EnvVarNode(token.payload)
+    @classmethod
+    def parse_prefix(cls, parser: Parser, token: Token) -> PythonAstNode:
+        if token.kind == Kind.name:
+            return PythonExpr(token.payload)
         else:
-            source = textwrap.dedent(token.payload).strip()
-            if token.kind == Kind.line_expr:
-                return PythonExpr(source)
-            else:
+            if token.kind == Kind.block_expr:
+                source = textwrap.dedent(token.payload).strip()
                 return PythonBlock(source)
+            else:
+                source = re.sub("\s+", " ", token.payload).strip()
+                return PythonExpr(source)
 
 
 class JsonPathParselet(Parselet):
-    def parse_prefix(self, parser: Parser, token: Token) -> AstNode:
+    @classmethod
+    def parse_prefix(cls, parser: Parser, token: Token) -> AstNode:
         return JsonpathNode(token.payload)
 
 
+class AssignParselet(Parselet):
+    @classmethod
+    def parse_prefix(cls, parser: Parser, kw_token: Token) -> Assign:
+        name_token = parser.consume(Kind.name)
+        name = name_token.payload
+        parser.consume(Kind.assign_eq, ErrType.item)
+        parser.skip_any(Kind.newline)
+
+        first_expr_token = parser.current()
+        expr_node = parser.expression()
+        if expr_node.assumes_name():
+            expr_node.name = name
+        if isinstance(expr_node, (PythonAstNode, Literal, DictNode, ListNode)):
+            dynamic = kw_token.kind == Kind.var
+            return Assign(name, expr_node, dyn=dynamic,
+                          start=kw_token.start, end=expr_node.end)
+        else:
+            raise parser.expected(ErrType.syntax, "assignment value",
+                                  first_expr_token)
+
+
+class DynParselet(Parselet):
+    @classmethod
+    def parse_prefix(cls, parser: Parser, kw_token: Token) -> Prop:
+        name_token = parser.consume(Kind.name)
+        name = name_token.payload
+        parser.consume(Kind.colon, ErrType.item)
+        parser.skip_any(Kind.newline)
+
+        first_expr_token = parser.current()
+        expr_node = parser.expression()
+        if expr_node.assumes_name():
+            expr_node.name = name
+        if isinstance(expr_node, PythonAstNode):
+            return Prop(name, expr_node, dyn=True, start=kw_token.start,
+                        end=expr_node.end)
+        else:
+            raise parser.expected(ErrType.syntax, "property expression",
+                                  first_expr_token)
+
+
+class FuncParselet(Parselet):
+    @classmethod
+    def parse_prefix(cls, parser: Parser, kw_token: Token) -> FuncNode:
+        ex_token = parser.consume()
+        if ex_token.kind in (Kind.line_expr, Kind.block_expr, Kind.value_expr):
+            ex_node = ExprParselet.parse_prefix(parser, ex_token)
+            return FuncNode(ex_node, start=kw_token.start, end=ex_node.end)
+        else:
+            raise parser.expected(ErrType.syntax, "Python block",
+                                  ex_token)
+
+
+class RefParselet(Parselet):
+    @classmethod
+    def parse_prefix(cls, parser: Parser, kw_token: Token) -> RefNode:
+        ref_token = parser.consume(Kind.string)
+        obj = RefNode(ref_token.payload)
+        obj.items, obj.end = take_object_params(parser, (
+            Assign, ObjectNode,
+        ))
+        return obj
+
+
 prefixes: dict[Kind, Parselet] = {
-    Kind.open_brace: DictParselet(),
-    Kind.open_square: ListParselet(),
-    Kind.object: ObjectParselet(),
-    Kind.template: ObjectParselet(),
-    Kind.model: ObjectParselet(),
-    Kind.string: LiteralParselet(),
-    Kind.number: LiteralParselet(),
-    Kind.literal: LiteralParselet(),
-    Kind.line_expr: ExprParselet(),
-    Kind.block_expr: ExprParselet(),
-    Kind.value_expr: ExprParselet(),
-    Kind.env_var: ExprParselet(),
-    Kind.jsonpath: JsonPathParselet(),
-    Kind.name: ExprParselet(),
+    Kind.open_brace: DictParselet,
+    Kind.open_square: ListParselet,
+    Kind.object: ObjectParselet,
+    Kind.template: ObjectParselet,
+    Kind.over: OverParselet,
+    Kind.model: SimpleObjectParselet(ModelNode),
+    Kind.style: SimpleObjectParselet(StyleNode),
+    Kind.string: LiteralParselet,
+    Kind.number: LiteralParselet,
+    Kind.literal: LiteralParselet,
+    Kind.line_expr: ExprParselet,
+    Kind.block_expr: ExprParselet,
+    Kind.value_expr: ExprParselet,
+    Kind.let: AssignParselet,
+    Kind.var: AssignParselet,
+    Kind.dyn: DynParselet,
+    Kind.func: FuncParselet,
+    Kind.env_var: EnvVarParselet,
+    Kind.jsonpath: JsonPathParselet,
+    Kind.name: ExprParselet,
+    Kind.before: InsertionParselet,
+    Kind.after: InsertionParselet,
+    Kind.insert: InsertionParselet,
 }
 infixes: dict[Kind, Parselet] = {
     # No infix or suffix syntax currently
@@ -695,10 +1033,10 @@ class Parser:
         self.tokens = list(lex(text))
         # self.depth = 0
 
-    def expected(self, err_type: ErrType, expectation: str, found: Token
+    def expected(self, err_type: ErrType, expected: str, found: Token
                  ) -> Exception:
-        return self.err(err_type, f"Expected {expectation}, "
-                        f"found {found.kind.name} {found.payload!r}",
+        return self.err(err_type, f"Expected {expected}, "
+                        f"found {found.kind}({found.payload!r})",
                         found)
 
     def err(self, err_type: ErrType, message: str, token: Token = None
@@ -756,9 +1094,7 @@ class Parser:
         token = self.consume()
         prefix_parselet = prefixes.get(token.kind)
         if not prefix_parselet:
-            raise self.err(ErrType.syntax,
-                           f"Can't parse {token.kind.name} {token.payload!r}",
-                           token)
+            raise Exception(f"No parser for {token.kind}")
 
         # self.depth += 1
         expr = prefix_parselet.parse_prefix(self, token)
@@ -774,25 +1110,24 @@ class Parser:
         return expr
 
     def parse_module(self) -> ModuleNode:
-        nodes: list[AstNode] = []
+        items: list[AstNode] = []
         while self.current().kind != Kind.eof:
             if self.skip_any(Kind.newline):
                 continue
-            nodes.append(self.expression())
-        return ModuleNode(nodes)
+            items.append(self.expression())
+        return ModuleNode(items)
 
     def parse(self) -> AstNode:
         node = self.parse_module()
-        if isinstance(node, ModuleNode) and len(node.value) == 1:
-            node = node.value[0]
         if self.tokens:
             tk = self.tokens[0]
             raise self.err(ErrType.syntax, f"Syntax error: {tk.payload}", tk)
-        return node
+
+        if len(node.items) == 1:
+            return node.items[0]
+        else:
+            return node
 
 
 def parse(text: str) -> AstNode:
     return Parser(text).parse()
-
-
-

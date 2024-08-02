@@ -206,7 +206,7 @@ class ScrollGraphic(core.RectangleGraphic):
         return constraint
 
     def _onVScroll(self) -> None:
-        v = self.verticalScrollBar().value()
+        v = self.verticalScrollBar().values()
         self._scroll_pos.setY(max(0, v))
         self._updateScrollPosition()
         self._updateTitleAndFooterVisibility()

@@ -1,5 +1,5 @@
+from typing import Pattern, Match
 import pathlib
-
 import pytest
 
 from tilefx.file import build
@@ -13,6 +13,32 @@ def test_empty_file():
     # This file is empty
     
     """) == tf.ModuleNode([])
+
+
+def matches(expr: Pattern, string: str) -> bool:
+    m = expr.match(string)
+    return m and m.end() == len(string)
+
+
+def test_parse_numbers():
+    nx = tf.number_expr
+    assert matches(nx, "100")
+    assert matches(nx, "+100")
+    assert matches(nx, "-100")
+    assert matches(nx, "-100.")
+    assert matches(nx, "-100.1")
+    assert matches(nx, "+100.1")
+    assert matches(nx, ".100")
+    assert matches(nx, ".1234")
+    assert matches(nx, "-.1234")
+    assert matches(nx, "1e6")
+    assert matches(nx, "1e0")
+    assert matches(nx, "1.2e6")
+    assert matches(nx, "1.2e-6")
+    assert matches(nx, "1.2e+6")
+    assert not matches(nx, "1.2e6.5")
+    assert not matches(nx, "e6")
+    assert not matches(nx, "1a5")
 
 
 def test_parse_literals():
@@ -114,12 +140,12 @@ def test_dict_of_dicts():
 
 def test_parse_list():
     p = tf.parse("""
-    [ "foo", 20, obj hello {}, true]
+    [ "foo", 20, def hello {}, true]
     """)
     assert p == tf.ListNode([
         tf.Literal("foo"),
         tf.Literal(20),
-        tf.ObjectNode("hello", None, {}),
+        tf.ObjectNode("hello", None, []),
         tf.Literal(True)
     ])
 
@@ -134,26 +160,26 @@ def test_parse_list():
     assert p == tf.ListNode([
         tf.Literal("foo"),
         tf.Literal(20),
-        tf.StaticPythonExpr("foo.bar"),
+        tf.PythonExpr("foo.bar"),
         tf.Literal(True)
     ])
 
 
 def test_value_expr():
     p = tf.parse("""
-    {
+    def w "z" {
         foo: x + 5
         bar: (y / 2)
     }
     """)
-    assert p == tf.DictNode({
-        "foo": tf.StaticPythonExpr("x + 5"),
-        "bar": tf.StaticPythonExpr("y / 2")
-    })
+    assert p == tf.ObjectNode("w", "z", [
+        tf.Prop("foo", tf.PythonExpr("x + 5")),
+        tf.Prop("bar", tf.PythonExpr("(y / 2)")),
+    ])
 
     with pytest.raises(tf.ParserError):
         tf.parse("""
-        {
+        def w "z" {
             foo: 20 100
         }
         """)
@@ -161,7 +187,7 @@ def test_value_expr():
 
 def test_multiline_value_expr():
     p = tf.parse("""
-    {
+    def w "z" {
         foo: (
             "real" if is_real
             else "unreal"
@@ -170,51 +196,53 @@ def test_multiline_value_expr():
         bar: "hello"
     }
     """)
-    assert p == tf.DictNode({
-        "foo": tf.StaticPythonExpr('"real" if is_real\n'
-                               '            else "unreal"'),
-        "comma": tf.StaticPythonExpr("x + 10"),
-        "bar": tf.Literal("hello")
-    })
+    assert p == tf.ObjectNode("w", "z", [
+        tf.Prop("foo", tf.PythonExpr('( "real" if is_real else "unreal" )')),
+        tf.Prop("comma", tf.PythonExpr("x + 10")),
+        tf.Prop("bar", tf.Literal("hello"))
+    ])
 
 
-def test_value_expr_as_key():
+# def test_value_expr_as_key():
+#     p = tf.parse("""
+#     {
+#         (DataID(0, "display")): "Hello"
+#     }
+#     """)
+#     assert p == tf.DictNode({
+#         tf.ComputedKey('DataID(0, "display")'):
+#             tf.Literal("Hello")
+#     })
+
+
+def test_dynamic_property():
     p = tf.parse("""
-    {
-        (DataID(0, "display")): "Hello"
-    }
-    """)
-    assert p == tf.DictNode({
-        tf.ComputedKey('DataID(0, "display")'):
-            tf.Literal("Hello")
-    })
-
-
-def test_deferred_line_expr():
-    p = tf.parse("""
-    {
+    def foo "bar" {
         foo: `node.path() + node.name()`,
-        bar: `self.count()`
+        dyn bar: `self.count()`
     }
     """)
-    assert p == tf.DictNode({
-        "foo": tf.PythonExpr("node.path() + node.name()"),
-        "bar": tf.PythonExpr("self.count()"),
-    })
+    assert p == tf.ObjectNode("foo", "bar", [
+        tf.Prop("foo", tf.PythonExpr("node.path() + node.name()")),
+        tf.Prop("bar", tf.PythonExpr("self.count()"), dyn=True),
+    ])
 
 
-def test_deferred_block_expr():
+def test_deferred_property_block():
     p = tf.parse("""
-    {
-        foo: ```
+    def foo "bar" {
+        dyn foo: ```
         x = 10
         self.text = {"x": x}
         ```
+        bar: 10
     }
     """)
-    assert p == tf.DictNode({
-        "foo": tf.PythonBlock('x = 10\nself.text = {"x": x}'),
-    })
+    assert p == tf.ObjectNode("foo", "bar", [
+        tf.Prop("foo", tf.PythonBlock('x = 10\nself.text = {"x": x}'),
+                dyn=True),
+        tf.Prop("bar", tf.Literal(10)),
+    ])
 
 
 def test_parse_jsonpath():
@@ -242,35 +270,147 @@ def test_parse_jsonpath_this():
         type: @.type
     }
     """)
-    assert p == tf.ModelNode("foo", {
-        "rows": tf.JsonpathNode("$.attrs"),
-        "name": tf.JsonpathNode("@.name"),
-        "type": tf.JsonpathNode("@.type")
-    })
+    assert p == tf.ModelNode("foo", [
+        tf.Prop("rows", tf.JsonpathNode("$.attrs")),
+        tf.Prop("name", tf.JsonpathNode("@.name")),
+        tf.Prop("type", tf.JsonpathNode("@.type")),
+    ])
 
 
 def test_parse_object():
     p = tf.parse("""
-    obj surface {
+    def surface {
         foo: 100
         bar: "baz"
     }
     """)
-    assert p == tf.ObjectNode("surface", None, {
-        "foo": tf.Literal(100),
-        "bar": tf.Literal("baz")
-    })
+    assert p == tf.ObjectNode("surface", None, [
+        tf.Prop("foo", tf.Literal(100)),
+        tf.Prop("bar", tf.Literal("baz")),
+    ])
 
     p = tf.parse("""
-    obj surface "root" {
+    def surface "root" {
         foo: 100
         bar: "baz"
     }
     """)
-    assert p == tf.ObjectNode("surface", "root", {
-        "foo": tf.Literal(100),
-        "bar": tf.Literal("baz")
-    })
+    assert p == tf.ObjectNode("surface", "root", [
+        tf.Prop("foo", tf.Literal(100)),
+        tf.Prop("bar", tf.Literal("baz")),
+    ])
+
+    p = tf.parse("""
+    def foo "bar" {
+        def text "node_name" { x: 0, y: 5 }
+    }
+    """)
+    assert p == tf.ObjectNode("foo", "bar", [
+        tf.ObjectNode("text", "node_name", [
+            tf.Prop("x", tf.Literal(0)),
+            tf.Prop("y", tf.Literal(5)),
+        ])
+    ])
+
+
+def test_parse_single_param():
+    p = tf.parse('def foo "bar" {x: y}')
+    assert p == tf.ObjectNode("foo", "bar", [
+        tf.Prop("x", tf.PythonExpr("y"))
+    ])
+
+
+def test_property_expression():
+    p = tf.parse("""
+        def foo "bar" {
+            x: Qt.AlignLeft | Qt.AlignTop
+        }
+        """)
+    assert p == tf.ObjectNode("foo", "bar", [
+        tf.Prop("x", tf.PythonExpr("Qt.AlignLeft | Qt.AlignTop")),
+    ])
+
+
+def test_multiline_property_expression():
+    p = tf.parse("""
+    def foo "bar" {
+        x: foo + (
+            1, 2
+        )
+    }
+    """)
+    assert p == tf.ObjectNode("foo", "bar", [
+        tf.Prop("x", tf.PythonExpr(
+            "foo + ( 1, 2 )"
+        )),
+    ])
+
+
+def test_numberlike_property_expression():
+    with pytest.raises(tf.ParserError):
+        tf.parse("""
+        def foo "bar" {
+            x: 100 + q
+        }
+        """)
+
+    p = tf.parse("""
+    def foo "bar" {
+        x: `100 + q`
+    }
+    """)
+    assert p == tf.ObjectNode("foo", "bar", [
+        tf.Prop("x", tf.PythonExpr("100 + q")),
+    ])
+
+
+def test_keywordlike_property_expression():
+    with pytest.raises(tf.ParserError):
+        tf.parse("""
+        def foo "bar" {
+            x: after + 5
+        }
+        """)
+
+    p = tf.parse("""
+    def foo "bar" {
+        x: `after + 5`
+    }
+    """)
+    assert p == tf.ObjectNode("foo", "bar", [
+        tf.Prop("x", tf.PythonExpr("after + 5")),
+    ])
+
+    # p = tf.parse("""
+    # def foo "bar" {
+    #     x: foo + (
+    #         1, 2
+    #     )
+    #     x: 100 + q
+    #     y: Qt.AlignLeft | Qt.AlignTop
+    #     z: after + 5
+    # }
+    # """)
+    # assert p == tf.ObjectNode("foo", "bar", [
+    #     tf.Prop("x", tf.PythonExpr("100 + 200")),
+    #     tf.Prop("y", tf.PythonExpr("Qt.AlignLeft | Qt.AlignTop")),
+    #     tf.Prop("z", tf.PythonExpr("baz + (6,\n2)")),
+    # ])
+
+
+def test_parse_over():
+    p = tf.parse("""
+    over "root" {
+        var x = `env.total + 200`
+        foo: 100
+        bar: "baz"
+    }
+    """)
+    assert p == tf.OverNode("root", [
+        tf.Assign("x", tf.PythonExpr("env.total + 200"), dyn=True),
+        tf.Prop("foo", tf.Literal(100)),
+        tf.Prop("bar", tf.Literal("baz")),
+    ])
 
 
 def test_parse_models():
@@ -279,18 +419,18 @@ def test_parse_models():
             rows: $.rows.items()
         }
         """)
-    assert p == tf.ModelNode(None, {
-        "rows": tf.JsonpathNode("$.rows.items()")
-    })
+    assert p == tf.ModelNode(None, [
+        tf.Prop("rows", tf.JsonpathNode("$.rows.items()")),
+    ])
 
     p = tf.parse("""
         model "attrs" {
             rows: `attrs`
         }
         """)
-    assert p == tf.ModelNode("attrs", {
-        "rows": tf.PythonExpr("attrs")
-    })
+    assert p == tf.ModelNode("attrs", [
+        tf.Prop("rows", tf.PythonExpr("attrs")),
+    ])
 
 
 def test_parse_template():
@@ -300,10 +440,10 @@ def test_parse_template():
         y: "why"
     }
     """)
-    assert p == tf.ObjectNode("anchors", None, {
-        "x": tf.Literal(10),
-        "y": tf.Literal("why")
-    }, is_template=True)
+    assert p == tf.ObjectNode("anchors", None, [
+        tf.Prop("x", tf.Literal(10)),
+        tf.Prop("y", tf.Literal("why")),
+    ], is_template=True)
 
     p = tf.parse("""
     template rectangle "count" {
@@ -311,10 +451,10 @@ def test_parse_template():
         y: "why"
     }
     """)
-    assert p == tf.ObjectNode("rectangle", "count", {
-        "x": tf.Literal(10),
-        "y": tf.Literal("why")
-    }, is_template=True)
+    assert p == tf.ObjectNode("rectangle", "count", [
+        tf.Prop("x", tf.Literal(10)),
+        tf.Prop("y", tf.Literal("why")),
+    ], is_template=True)
 
     with pytest.raises(tf.ParserError):
         tf.parse("""
@@ -327,77 +467,48 @@ def test_parse_template():
 
 def test_object_values():
     p = tf.parse("""
-    obj surface "root" {
+    def surface "root" {
         foo: 100
-        title_item: obj text {
+        title_item: def text {
             x: 10
             y: 20
         }
         bar: "baz"
-    }
-    """)
-    assert p == tf.ObjectNode("surface", "root", {
-        "foo": tf.Literal(100),
-        "title_item": tf.ObjectNode("text", None, {
-            "x": tf.Literal(10),
-            "y": tf.Literal(20)
-        }),
-        "bar": tf.Literal("baz")
-    })
-
-
-def test_parse_on_update():
-    p = tf.parse("""
-    obj surface {
-        ```
-        x = 10
-        ```
-        
-        y: 20
-        z: 40
-    }
-    """)
-    assert p == tf.ObjectNode("surface", None, {
-        "y": tf.Literal(20),
-        "z": tf.Literal(40)
-    }, on_update=tf.PythonBlock("x = 10"))
-
-    p = tf.parse("""
-    model "foo" {
-        ```
-        x = 10
-        ```
-
-        rows: $.attrs.*
-        y: `row.y`
-        z: `row.z`
-    }
-    """)
-    assert p == tf.ModelNode("foo", {
-        "rows": tf.JsonpathNode("$.attrs.*"),
-        "y": tf.PythonExpr("row.y"),
-        "z": tf.PythonExpr("row.z")
-    }, on_update=tf.PythonBlock("x = 10"))
-
-    with pytest.raises(tf.ParserError):
-        tf.parse("""
-        obj surface {
-            x: 20
-            ```
-            print('hello')
-            ```
+        baz: {
+            w: 50
+            z: 100
         }
-        """)
+    }
+    """)
+    assert p == tf.ObjectNode("surface", "root", [
+        tf.Prop("foo", tf.Literal(100)),
+        tf.Prop("title_item", tf.ObjectNode("text", None, [
+            tf.Prop("x", tf.Literal(10)),
+            tf.Prop("y", tf.Literal(20)),
+        ])),
+        tf.Prop("bar", tf.Literal("baz")),
+        tf.Prop("baz", tf.DictNode({
+            "w": tf.Literal(50),
+            "z": tf.Literal(100)
+        }))
+    ])
 
-    with pytest.raises(tf.ParserError):
-        tf.parse("""
-        obj surface {
-            ```
-            print('hello')
-            ```,
-            x: 10
-        }
-        """)
+
+def test_object_docstring():
+    p = tf.parse('''
+    def foo "bar" {
+        doc: """
+        Hello
+        """
+        x: 10
+    }
+    ''')
+    assert p == tf.ObjectNode("foo", "bar", [
+        tf.Prop("doc", tf.Literal(
+            "\n        Hello\n        "
+        )),
+        tf.Prop("x", tf.Literal(10)),
+    ])
 
 
 def test_parse_module():
@@ -406,15 +517,183 @@ def test_parse_module():
     import m
     ```
     
-    obj surface "root" {
+    def surface "root" {
         foo: m.xy
     }
     """)
     assert p == tf.ModuleNode([
         tf.PythonBlock("import m"),
-        tf.ObjectNode("surface", "root", {
-            "foo": tf.StaticPythonExpr("m.xy")
-        })
+        tf.ObjectNode("surface", "root", [
+            tf.Prop("foo", tf.PythonExpr("m.xy"))
+        ])
+    ])
+
+
+def test_parse_module_style():
+    p = tf.parse("""
+    style "foo" {
+        x: 10
+        y: 20
+    }
+
+    def surface "root" {
+        x: 20,
+        y: 30
+    }
+    """)
+    assert p == tf.ModuleNode([
+        tf.StyleNode("foo", [
+            tf.Prop("x", tf.Literal(10)),
+            tf.Prop("y", tf.Literal(20))
+        ]),
+        tf.ObjectNode("surface", "root", [
+            tf.Prop("x", tf.Literal(20)),
+            tf.Prop("y", tf.Literal(30)),
+        ])
+    ])
+
+
+def test_parse_style_in_object():
+    p = tf.parse("""
+    def surface "root" {
+        style : "foo"
+        style "foo" {
+            x: 10
+            y: 20
+        }
+        z: 30
+    }
+    """)
+    assert p == tf.ObjectNode("surface", "root", [
+        tf.Prop("style", tf.Literal("foo")),
+        tf.StyleNode("foo", [
+            tf.Prop("x", tf.Literal(10)),
+            tf.Prop("y", tf.Literal(20)),
+        ]),
+        tf.Prop("z", tf.Literal(30)),
+    ])
+
+
+def test_parse_object_options():
+    p = tf.parse("""
+    def foo "bar" (style="baz") {
+    
+    }
+    """)
+    assert p == tf.ObjectNode(
+        "foo", "bar", [], options={"style": tf.Literal("baz")}
+    )
+
+    p = tf.parse("""
+    def foo "bar" (x=10, y=20) {
+
+    }
+    """)
+    assert p == tf.ObjectNode(
+        "foo", "bar", [], options={
+            "x": tf.Literal(10),
+            "y": tf.Literal(20)
+        }
+    )
+
+    p = tf.parse("""
+    model (
+        rows=$.attrs.items()
+    ) {
+        id: this[0]
+        value: this[1]
+    }
+    """)
+    assert p == tf.ModelNode(None, [
+        tf.Prop("id", tf.PythonExpr("this[0]")),
+        tf.Prop("value", tf.PythonExpr("this[1]"))
+    ], options={
+        "rows": tf.JsonpathNode("$.attrs.items()")
+    })
+
+    with pytest.raises(tf.ParserError):
+        tf.parse("""
+        def foo "bar" (style=model {}) {
+
+        }
+        """)
+
+
+def test_empty_style_name():
+    p = tf.parse("""
+    def foo "bar" () {
+
+    }
+    """)
+    assert p == tf.ObjectNode("foo", "bar", [], options={})
+
+
+def test_parse_style_value():
+    p = tf.parse("""
+    def surface "root" {
+        w:  style {
+            x: 10
+            y: 20
+        }
+        z: 30
+    }
+    """)
+    assert p == tf.ObjectNode("surface", "root", items=[
+        tf.Prop("w", tf.StyleNode(None, items=[
+            tf.Prop("x", tf.Literal(10)),
+            tf.Prop("y", tf.Literal(20)),
+        ])),
+        tf.Prop("z", tf.Literal(30))
+    ])
+
+
+def test_parse_assignment():
+    p = tf.parse("""
+    var foo = `env.x + 10`
+    """)
+    assert p == tf.Assign("foo", tf.PythonExpr("env.x + 10"))
+
+    p = tf.parse("""
+    let foo = `env.x + 10`
+    """)
+    assert p == tf.Assign("foo", tf.PythonExpr("env.x + 10"), dyn=False)
+
+    p = tf.parse("""
+    var foo =
+        `env.x + 10`
+    """)
+    assert p == tf.Assign("foo", tf.PythonExpr("env.x + 10"))
+
+
+def test_parse_assignment_in_object():
+    p = tf.parse("""
+    def foo "bar" {
+        let x = {
+            "a": "b",
+            "c": "d"
+        }
+        var y = `x[z]`
+    }
+    """)
+    assert p == tf.ObjectNode("foo", "bar", [
+        tf.Assign("x", tf.DictNode({
+            "a": tf.Literal("b"),
+            "c": tf.Literal("d"),
+        }), dyn=False),
+        tf.Assign("y", tf.PythonExpr("x[z]")),
+    ])
+
+
+def test_var_in_object():
+    p = tf.parse("""
+    def w "x" {
+        var foo = `env.y - 2`
+        z: `foo * 3`
+    }
+    """)
+    assert p == tf.ObjectNode("w", "x", [
+        tf.Assign("foo", tf.PythonExpr("env.y - 2")),
+        tf.Prop("z", tf.PythonExpr("foo * 3")),
     ])
 
 
@@ -444,86 +723,107 @@ def test_env_var():
 
 def test_object_items():
     p = tf.parse("""
-    obj surface "root" {
+    def surface "root" {
         x: 10
         y: "why"
         
-        obj text { html: "Hello" }
+        def text { html: "Hello" }
         template foo {}
         model {
             rows: $.attrs
         }
     }
     """)
-    assert p == tf.ObjectNode("surface", "root", {
-        "x": tf.Literal(10),
-        "y": tf.Literal("why"),
-    }, [
-        tf.ObjectNode("text", None, {
-            "html": tf.Literal("Hello")
-        }),
-        tf.ObjectNode("foo", None, {}, is_template=True),
-        tf.ModelNode(None, {
-            "rows": tf.JsonpathNode("$.attrs")
-        })
-    ])
-
-
-def test_combined():
-    text = pathlib.Path("../files/nodeinfo.tilefile").read_text()
-    p = tf.parse(text)
-    assert p == tf.ObjectNode("surface", "root", {
-        "spacing": tf.Literal(10),
-        "margins": tf.Literal(5),
-        "title_target": tf.Literal("node_header"),
-        "cutoff_item": tf.Literal("comment_layout"),
-        "label": tf.PythonExpr("node.name()"),
-        "memory": tf.JsonpathNode("$.memory.total"),
-        "title_item": tf.ObjectNode("anchors", None, {
-            "spacing": tf.Literal(5),
-            "fixed_height": tf.Literal(28),
-            "fill_color": tf.StaticPythonExpr("ThemeColor.bg"),
-            "on_update": tf.PythonBlock(
-                'titlebar_icon.icon_name = icon\n'
-                'titlebar_path.html = f"{parent_path}/<b>{node_name}</b>"'
-            ),
-        }, [
-            tf.ObjectNode("houdini_icon", "titlebar_icon", {
-                "fixed_size": tf.ListNode([
-                    tf.Literal(28),
-                    tf.Literal(28)]
-                ),
-                "anchor.left": tf.DictNode({
-                    "to": tf.Literal("parent.left"),
-                    "spacing": tf.Literal(10)
-                }),
-                "anchor.vcenter": tf.Literal("parent.v_center"),
-                "icon_name": tf.PythonExpr("icon"),
-            }),
-            tf.ObjectNode("controls.text", "titlebar_path", {
-                "text_color": tf.StaticPythonExpr("ThemeColor.primary"),
-                "text_size": tf.StaticPythonExpr("TextSize.small"),
-                "text_align": tf.StaticPythonExpr(
-                    "Qt.Align.vcenter | Qt.Align.left"),
-                "html": tf.PythonExpr(
-                    'f"{parent_path}/<b>{node_name}</b>"',
-                )
-            })
+    assert p == tf.ObjectNode("surface", "root", [
+        tf.Prop("x", tf.Literal(10)),
+        tf.Prop("y", tf.Literal("why")),
+        tf.ObjectNode("text", None, [
+            tf.Prop("html", tf.Literal("Hello")),
+        ]),
+        tf.ObjectNode("foo", None, is_template=True),
+        tf.ModelNode(None, [
+            tf.Prop("rows", tf.JsonpathNode("$.attrs")),
         ])
-    }, [
-        tf.ObjectNode("row", "node_header", {
-            "bg_visible": tf.Literal(False),
-            "margins": tf.Literal(0),
-            "spacing": tf.Literal(5)
-        })
     ])
 
 
-def test_generation():
-    text = pathlib.Path("../files/nodeinfo.tilefile").read_text()
+def test_parse_callback():
+    p = tf.parse("""
+    def checkbox "show_comment" {
+        on_state_change: fn ```
+            env.setOutputIndex(self.currentIndex())
+        ```
+    }
+    """)
+    assert p == tf.ObjectNode("checkbox", "show_comment", [
+        tf.Prop("on_state_change",
+                tf.FuncNode(
+                    tf.PythonBlock("env.setOutputIndex(self.currentIndex())")
+                ))
+    ])
+
+
+def test_parse_object_insertion():
+    p = tf.parse("""
+    over "root" {
+        before "bar" def text "baz" { x: 30 }
+    }
+    """)
+    assert p == tf.OverNode("root", [
+        tf.InsertionNode(tf.Kind.before, "bar", tf.ObjectNode("text", "baz", [
+            tf.Prop("x", tf.Literal(30))
+        ]))
+    ])
+
+    p = tf.parse("""
+    over "root" {
+        after "bar" def text "baz" { x: 30 }
+    }
+    """)
+    assert p == tf.OverNode("root", [
+        tf.InsertionNode(tf.Kind.after, "bar", tf.ObjectNode("text", "baz", [
+            tf.Prop("x", tf.Literal(30))
+        ]))
+    ])
+
+    p = tf.parse("""
+    over "root" {
+        insert 1 def text "baz" { x: 30 }
+    }
+    """)
+    assert p == tf.OverNode("root", [
+        tf.InsertionNode(tf.Kind.insert, 1, tf.ObjectNode("text", "baz", [
+            tf.Prop("x", tf.Literal(30))
+        ]))
+    ])
+
+    # Insert must be followed by a number
+    with pytest.raises(tf.ParserError):
+        tf.parse("""
+        over "root" {
+            insert "foo" def text "baz" { x: 30 }
+        }
+        """)
+
+    # Before must be followed by a string
+    with pytest.raises(tf.ParserError):
+        tf.parse("""
+        over "root" {
+            before 5 def text "baz" { x: 30 }
+        }
+        """)
+
+
+def test_big_file():
+    text = pathlib.Path("../files/node_info.tilefile").read_text()
     p = tf.parse(text)
-    assert isinstance(p, tf.ModuleNode)
-    ctx = build.BuildContext(p, "", "")
-    lines = build.moduleSetup(p, ctx)
-    print("\n".join(lines))
-    assert False
+
+
+# def test_generation():
+#     text = pathlib.Path("../files/nodeinfo.tilefile").read_text()
+#     p = tf.parse(text)
+#     assert isinstance(p, tf.ModuleNode)
+#     ctx = build.BuildContext(p, "", "")
+#     lines = build.moduleSetup(p, ctx)
+#     print("\n".join(lines))
+#     assert False

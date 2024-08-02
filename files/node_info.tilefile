@@ -1,0 +1,844 @@
+```
+from time import perf_counter
+```
+
+style "simple" {
+    bg_visible: false
+    margins: 0
+    label_margins: 0
+    label_size: TextSize.xsmall
+    corner_radius: 0
+}
+style "plain" {
+    bg_visible: false
+    margins: 0
+    label_visible: false
+}
+style "kv" {
+    bg_visible: false
+    margins: 0
+    label_margins: [0, 0, 10, 0]
+    label_size: TextSize.xsmall
+    label_edge: Qt.LeftEdge
+    side_label_rotated: false
+    side_label_width: 100
+    label_align: "right v_center"
+    text_align: "left v_center"
+}
+
+def surface "root" {
+    spacing: 10
+    margins: 5
+    title_item: def anchors "titlebar" {
+        spacing: 5
+        fixed_height: 28
+        fill_color: ThemeColor.bg
+
+        def houdini_icon "titlebar_icon" {
+            fixed_size: [28, 28]
+            anchor.left: "parent.left"
+            anchor.left.spacing: 10
+            anchor.v_center: "parent.v_center"
+            bg_visible: false
+            label_visible: false
+            icon_name: `env.icon`
+        }
+        def controls.text "titlebar_node_path" {
+            anchor.left: "titlebar_icon.right"
+            anchor.left.spacing: 5
+            anchor.top: "parent.top"
+            anchor.bottom: "parent.bottom"
+            anchor.right: "parent.right"
+            text_color: ThemeColor.primary
+            text_size: TextSize.small
+            text_align: "v_center left"
+            dyn html: `f"{env.parent_path}/<b>{env.node_name}</b>"`
+        }
+    }
+    title_target: "node_header"
+    cutoff_item: "comment_layout"
+
+    def row "node_header" {
+        margins: 0
+        spacing: 5
+
+        def houdini_icon "node_icon" {
+            label_visible: false
+            bg_visible: false
+            min_size: [44, 44]
+            size_to_fit: true
+            margins: 4
+            stretch: 0
+            dyn icon_name: `env.icon`
+        }
+        def column {
+            stretch: 1
+            margins: 0
+            spacing: 0
+
+            def controls.string "node_parent" {
+                text_size: TextSize.small
+                text_color: ThemeColor.secondary
+                margins: 0
+                dyn text: `env.parent_path`
+            }
+            def controls.string "node_name" {
+                text_size: TextSize.medium
+                weight: FontWeight.black
+                text_color: ThemeColor.primary
+                margins: 0
+                dyn text: `env.node_name`
+            }
+            def controls.text "node_type" {
+                text_size: TextSize.small
+                margins: 0
+                dyn text: `env.node_type_combined`
+            }
+        }
+    }
+
+    def controls.mx_button_strip "outputs" {
+        justify: Qt.AlignCenter
+        on_current_change: fn `env.setCurrentOutput(current_index)`
+        text_size: TextSize.small
+        dyn current_index: `env.current_output_index`
+        dyn visible: `env.category not in ('Vop', 'Cop') and len(output_labels) > 1`
+    }
+
+    def notice "not_cooked_message" {
+        label_visible: false
+        bg_visible: false
+        border_color: ThemeColor.warning
+        bg_color: ThemeColor.warning_surface
+        text_color: ThemeColor.warning_text
+        margins: [5, 2, 10, 2]
+        spacing: 5
+        houdini_icon: "MISC_uncooked"
+        icon_size: [32, 32]
+        text: "This node has not cooked yet"
+        text_align: "left v_center"
+        text_copyable: false
+        selectable: false
+        dyn visible: `env.cook_count == 0 and not isinstance(env.node, hou.RopNode)`
+    }
+
+    def data_line "notices" {
+        spacing: 5
+        margins: 0
+        label_visible: false
+        bg_visible: false
+        model: model {
+            rows: `env.notices`
+            id: `obj.type, obj.text`
+            notice_type: `obj.type`
+            text: `obj.text`
+        }
+        item_template: template notice {
+            margins: 0
+            bg_visible: false
+            text: `item.text`
+            notice_type: `item.notice_type`
+        }
+        dyn visible: `model.rowCount()`
+    }
+
+    def column "geo_info" {
+        margins: 0
+        spacing: 10
+        dyn visible: `bool(env.geom)`
+
+        def split "bbox_and_counts" {
+            margins: 0
+            break_width: 400
+            h_split: 0.5
+
+            def split "geo_counts" {
+                margins: 0
+                break_width: 400
+                side_width: 200
+                v_space: 0
+                text_copyable: true
+
+                def column "geo_component_counts" {
+                    bg_visible: false
+                    spacing: 0
+                    item_style: "kv"
+
+                    def number "points" {
+                        label: "Points"
+                        brief: false
+                        text_color: ThemeColor.blue
+                        text_size: TextColor.large
+                        text_weight: 600
+                        word_wrap: false
+                        dyn value: `point_count`
+                    }
+                    def number "prims" {
+                        label: "Primitives"
+                        brief: false
+                        text_color: ThemeColor.orange
+                        text_size: TextColor.large
+                        text_weight: 600
+                        word_wrap: false
+                        dyn value: `prim_count`
+                    }
+                    def number "vertices" {
+                        label: "Vertices"
+                        brief: false
+                        text_color: ThemeColor.purple
+                        text_size: TextColor.large
+                        text_weight: 600
+                        word_wrap: false
+                        dyn value: `vertex_count`
+                    }
+                }
+                def data_matrix "geo_prim_counts" {
+                    min_column_width: 160
+                    row_height: 18
+                    column_stretch: true
+                    margins: 0
+                    spacing: 0
+                    model: model {
+                        rows: `env.prim_type_counts.items() if prim_type_counts else ()`
+                        type: `obj[0]`
+                        count: `obj[1]`
+                        unique_id: "type"
+                        key_order: [
+                            "Polygons",
+                            "Dense Volumes",
+                            "VDB Volumes",
+                            "Packed Geometries",
+                            "Packed Prims"
+                        ]
+                    }
+                    item_template: template number {
+                        style: "kv"
+                        brief: false
+                        text_size: TextSize.medium
+                        text_weight: 400
+                        word_wrap: false
+                        text_color: ThemeColor.orange
+                        dyn label: `item.type`
+                        dyn value: `item.count`
+                    }
+                }
+            }
+            def column "bbox" {
+                label: "Bounding Box"
+                label_visible: false
+                bg_visible: true
+                margins: 5
+                spacing: 5
+                text_copyable: true
+
+                style "simple_tuple" {
+                    label_edge: Qt.LeftEdge
+                    side_label_rotated: false
+                    side_label_width: 50
+                    bg_visible: false
+                    label_align: "v_center right"
+                    label_margins: [0, 0, 10, 0]
+                    text_align: "right"
+                    text_size: TextSize.medium
+                    margins: 0
+                }
+
+                def tuple "bbox_center" {
+                    label: "Center"
+                    label.text_size: TextSize.xsmall
+                    style: "simple_tuple"
+                    dyn value: `env.bbox.sizevec() if env.bbox else ()`
+                }
+                def tuple "bbox_size" {
+                    label: "Size"
+                    label.text_size: TextSize.xsmall
+                    style: "simple_tuple"
+                    dyn value: `env.bbox.center() if env.bbox else ()`
+                }
+                def tuple "bbox_min" {
+                    label: "Min"
+                    label.text_size: TextSize.xsmall
+                    style: "simple_tuple"
+                    dyn value: `env.bbox.minvec() if env.bbox else ()`
+                }
+                def tuple "bbox_max" {
+                    label: "Max"
+                    label.text_size: TextSize.xsmall
+                    style: "simple_tuple"
+                    dyn value: `env.bbox.maxvec() if env.bbox else ()`
+                }
+            }
+        }
+        def data_matrix "custom_sop_info" {
+            row_height: 50
+            hide_when_empty: true
+            model: model {
+                rows: $.(*_sop_info ! l_system_sop_info ! alembic_sop_info).items()
+                id: `obj[0]`
+                value: `obj[1]`
+            }
+            item_template: template text {
+                dyn label: `item.id`
+                dyn text: `item.value`
+            }
+        }
+        def data_matrix "alembic_sop_info" {
+            row_height: 50
+            min_column_width: 100
+            hide_when_empty: true
+            model: model {
+                rows: $.alembic_sop_info.items()
+                id: `obj[0]`
+                value: `obj[1]`
+            }
+            item_template: template number {
+                dyn label: `item.id`
+                dyn value: `item.value`
+            }
+        }
+        def text "lsystem_sop_info" {
+            var lsystem = $.l_system_sop_info.'L-System string'
+
+            label: "L-System String"
+            text_family: "monospace"
+            dyn visible: `bool(env.lsystem)`
+            dyn text: `env.lsystem`
+        }
+        def matrix "geo_debug" {
+            margins: 0
+            min_column_width: 100
+            row_height: 40
+            item_style: "simple"
+
+            def text "detail_id" {
+                label: "Detail ID"
+                dyn text: `env.debug.detail_id if env.geom and env.debug else -1`
+            }
+            def text "change_count" {
+                label: "Change Count"
+                dyn text: `env.debug.change_count if env.geom and env.debug else -1`
+            }
+            def text "prims_id" {
+                label: "Primitives ID"
+                dyn text: `env.debug.prim_id if env.geom and env.debug else -1`
+            }
+        }
+
+        def column "attrs_layout" {
+            label: "Attributes"
+            label_visible: false
+            text_copyable: true
+            bg_visible: true
+            margins: 0
+            spacing: 10
+
+            def data_list "attrs" {
+                model: env.attr_model
+                grouped_by: "type"
+                text_copyable: true
+                shrinkable: true
+                shrink_min: 100
+                layout: def column {
+                    margins: 0
+                    spacing: 0
+                }
+                section_template: template data_list {
+                    dyn label: `section`
+                    label_sticky: true
+                    bg_visible: false
+                    label_bg_visible: true
+                    label_bg_free: true
+                    label.margins: [5, 5, 5, 0]
+                    label.line_width: 1.0
+                    label.text_tint_amount: 0.3
+                    label.text_size: TextSize.xsmall
+                    label.text_align: "center"
+                }
+                item_template: env.attr_item_template
+            }
+            def controls.labeled_switch "diff_switch" {
+                text: "Show Changes to Attributes"
+                text_size: TextSize.small
+                dot_radius: 6
+                margins: [0, 5, 0, 0]
+                dyn visible: `env.interactive and env.has_input`
+            }
+        }
+
+        def data_list "groups" {
+            label: "Groups"
+            label_visible: true
+            model: env.group_model
+            grouped_by: "type"
+            text_copyable: true
+            shrinkable: true
+            shrink_min: 100
+            secttion_template: template data_list {
+                dyn label: `section`
+                label_sticky: true
+                bg_visible: false
+                label_bg_visible: true
+                label_bg_free: true
+                label.margins: [5, 5, 5, 0]
+                label.line_width: 1.0
+                label.text_tint_amount: 0.3
+                label.text_size: TextSize.xsmall
+                label.text_align: "center"
+            }
+            item_template: env.group_item_template
+        }
+
+        def column "volumes_layout" {
+            label: "Volumns"
+            label_visible: false
+            text_copyable: true
+            margins: 0
+
+            template anchors "volume_item" {
+                def controls.string "vol_chip" {
+                    text_align: "center"
+                    text_color: ThemeColor.primary
+                    fixed_size: [16, 16]
+                    text_size: TextSize.medium
+                    anchor.left: "parent.left"
+                    anchor.v_center: "name.v_center"
+                    dyn glyph: `item.glyph`
+                }
+                def controls.string "vol_name" {
+                    fixed_height: 18
+                    anchor.left: "vol_chip.right"
+                    anchor.left.h_space: 5
+                    anchor.top: "parent.top"
+                    dyn text: `item.name if item.name else '(no name)'`
+                    dyn opacity: `1.0 if item.name else 0.66`
+                }
+                def controls.string "vol_prim_num" {
+                    text_size: TextSize.xsmall
+                    text_align: "left v_center"
+                    margins: [8, 0]
+                    pill_shaped: true
+                    fill_color: ThemeColor.surface_low
+                    anchor.top: "parent.top"
+                    anchor.left: "name.right"
+                    anchor.left.h_space: 10
+                    dyn text: `item.number`
+                }
+                def controls.string "vol_res" {
+                    fixed_height: 18
+                    anchor.left: "parent.h_center"
+                    anchor.left.h_space: 10
+                    anchor.top: "parent.top"
+                    anchor.right: "parent.right"
+                    dyn text: `f'{item.resolution} ({item.voxel_count:,} voxels)'`
+                }
+                def controls.string "vol_type" {
+                    text_size: TextSize.small
+                    anchor.left: "name.left"
+                    anchor.top: "name.bottom"
+                    text_color: ThemeColor.primary
+                    dyn text: `item.data_type`
+                }
+                def controls.numeric_string "vol_memory" {
+                    text_size: TextSize.small
+                    anchor.top: "name.bottom"
+                    anchor.left: "parent.h_center"
+                    anchor.left.h_space: 10
+                    anchor.right: "parent.right"
+                    text_color: ThemeColor.primary
+                    dyn value: `item.memory if item.memory >= 0 else None`
+                }
+                def controls.string "vol_voxel_size" {
+                    text_size: TextSize.small
+                    anchor.top: "name.bottom"
+                    anchor.left: "parent.h_center"
+                    anchor.left.h_space: 10
+                    anchor.right: "parent.right"
+                    text_color: ThemeColor.primary
+                    dyn text: `f'Voxel size: {item.voxel_size}'`
+                }
+            }
+
+            def data_list "native_volumes" {
+                dyn label: `f"{model.rowCount()} Native Volumes{'s' if model.rowCount() != 1 else ''}"`
+                model: native_volumes_model
+                item_template: volume_item
+            }
+            def data_list "vdb_volumes" {
+                dyn label: `f"{model.rowCount()} VDB Volumes{'s' if model.rowCount() != 1 else ''}"`
+                model: vdb_volumes_model
+                item_template: volume_item
+            }
+        }
+
+        def details "subnet_outputs_wrapper" {
+            label: "Subnetwork Outputs"
+            open: false
+            dyn visible: `bool(env.subnet_outputs)`
+
+            def text "subnet_outputs" {
+                dyn html: `env.subnet_output_html`
+            }
+        }
+    }
+
+    def column "lop_info" {
+        margins: 0
+        spacing: 10
+        dyn visible: `env.category == 'Lop'`
+
+        def number "usd_layer_count" {
+            label: "Layers"
+            label_edge: Qt.LeftEdge
+            side_label_rotated: false
+            label_align: center
+            bg_visible: false
+            text_size: TextSize.large
+            dyn value: $.lop_info.layer_count
+        }
+        def data_matrix "usd_prim_counts_total" {
+            label: "Prim Counts"
+            bg_visible: true
+            border_color: ThemeColor.bg
+            min_column_width: 100
+            row_height: 32
+            column_stretch: true
+            margins: 10
+            model: model {
+                rows: $.lop_info.prim_stats.total.items()
+                id: `obj[0]`
+                count: `obj[1]`
+            }
+            item_template: template number {
+                style: "simple"
+                text_size: TextSize.large
+                dyn label: `item.id`
+                dyn value: `item.count`
+            }
+        }
+        def details "modified_usd_prims_wrapper" {
+            label: "Prims Modified by This Node"
+            open: true
+
+            def controls.text "modified_usd_prims" {
+                text_size: TextSize.small
+                var prims = $.lop_info.modified_prims
+                dyn html: `"<b>".join(prims) if prims else ""`
+            }
+        }
+    }
+
+    def data_list "dop_objects" {
+        dyn label: `f"{model.rowCount()} Simulation Object{'s' if model.rowCount() != 1 else ''}"`
+        dyn visible: `env.category == 'Dop'`
+        min_column_width: 120
+        row_height: 36
+        model: model {
+            rows: `env.dop_objects`
+            var dop_geom = `obj.geometry()`
+            id: `obj.objid()`
+            name: `obj.name()`
+            point_count: `dop_geom.intrinsicValue('pointcount') if dop_geom else 0`
+            prim_count: `dop_geom.intrinsicValue('primitivecount') if dop_geom else 0`
+        }
+        item_template: template anchors {
+            def controls.string "dop_obj_id" {
+                anchor.left: "parent.left"
+                anchor.top: "parent.top"
+                fixed_size: [48, 18]
+                fill_color: ThemeColor.surface_low
+                text_size: TextSize.xsmall
+                text_align: "left v_center"
+                margins: [8, 0]
+                pill_shaped: true
+                dyn text: `item.number`
+            }
+            def controls.string "dop_obj_name" {
+                fixed_height: 18
+                anchor.left: "number.right"
+                anchor.left.h_space: 5
+                anchor.top: "parent.top"
+                anchor.right: "parent.right"
+                dyn text: `item.name`
+            }
+            def controls.numeric_string "dop_obj_prim_count" {
+                fixed_height: 18
+                anchor.top: "name.bottom"
+                anchor.left: "parent.left"
+                anchor.left.spacing: 8
+                dyn value: `f"{item.prim_count} prims"`
+            }
+            def controls.numeric_string "dop_obj_point_count" {
+                fixed_height: 18
+                anchor.top: "name.bottom"
+                anchor.left: "parent.h_center"
+                dyn value: `f"{item.point_count} pts"`
+            }
+        }
+    }
+
+    def matrix "obj_info" {
+        min_column_width: 180
+        row_height: 36
+        item_style: "simple"
+        dyn visible: `isinstance(env.node, hou.ObjNode)`
+
+        def text "obj_world_xform" {
+            label: "World Transform"
+            dyn value: $.obj_info.world_transform
+        }
+        def text "obj_local_xform" {
+            label: "Local Transform"
+            dyn value: $.obj_info.local_transform
+        }
+        def text "obj_pre_xform" {
+            label: "Pre-transform"
+            dyn value: $.obj_info.pre_transform
+        }
+        def text "obj_xform_order" {
+            label: "Transform Order"
+            dyn value: $.obj_info.transform_order
+        }
+        def text "obj_time_dep_display" {
+            label: "Display Time Dependent"
+            dyn value: $.obj_info.time_dependent_display
+        }
+        def text "obj_display_sop" {
+            label: "Display SOP"
+            text_color: ThemeColor.blue
+            clip: true
+            var display_sop = $.obj_info.display__sop
+            dyn value: `display_sop`
+            dyn visible: `bool(display_sop)`
+        }
+        def text "obj_render_sop" {
+            label: "Render SOP"
+            text_color: ThemeColor.purple
+            clip: true
+            var render_sop = $.obj_info.render__sop
+            dyn value: `render_sop`
+            dyn visible: `bool(render_sop)`
+        }
+        def text "obj_constraint_chop" {
+            label: "Constraint CHOP"
+            var constraint_chop = $.obj_info.constraints_chop
+            dyn value: `constraint_chop`
+            dyn visible: `constraint_chop != 'None'`
+        }
+    }
+
+    def matrix "rop_info" {
+        min_column_width: 100
+        row_height: 50
+        item_style: "simple"
+        var rop_info = $.rop_info
+        dyn visible: `bool(rop_info)`
+
+        def text "frame_range" {
+            label: "Frame Range"
+            dyn value: $.rop_info.range
+        }
+    }
+
+    def column "perf_mon" {
+        label: "Performance Profile"
+        margins: 10
+        dyn visible: `bool(env.perf_stats)`
+
+        def matrix "perf_numbers" {
+            min_column_width: 100
+            row_height: 50
+            spacing: [10, 5]
+            item_style: "simple"
+
+            def number "perf_cook_count" {
+                label: "Recorded Cooks"
+                dyn value: `env.perf_stats.count if env.perf_stats else 0`
+            }
+            def duration "perf_cook_time" {
+                label: "Total Cook Time"
+                hms: true
+                dyn value: `env.perf_stats.cook_total if env.perf_stats else 0`
+            }
+            def duration "perf_cook_time_self" {
+                label: "Total Cook Time"
+                hms: true
+                dyn value: `env.perf_stats.cook_self if env.perf_stats else 0`
+            }
+            def duration "perf_cook_time_avg" {
+                label: "Total Cook Time"
+                hms: true
+                dyn value: `env.perf_stats.cook_avg if env.perf_stats else 0`
+            }
+            def duration "perf_cook_time_min" {
+                label: "Total Cook Time"
+                hms: true
+                dyn value: `env.perf_stats.cook_min if env.perf_stats else 0`
+            }
+            def duration "perf_cook_time_max" {
+                label: "Total Cook Time"
+                hms: true
+                dyn value: `env.perf_stats.cook_max if env.perf_stats else 0`
+            }
+        }
+
+        def bar_chart "perf_graph" {
+            fixed_height: 40
+            monochrome: true
+            color: ThemeColor.fg
+            spacing: 0
+            dyn values: `env.perf_stats.per_frame if env.perf_stats else ()`
+            dyn visible: `env.perf_stats and len(env.perf_stats.per_frame) > 1`
+        }
+    }
+
+    def details "references_wrapper" {
+        label: "Node References"
+        open: false
+        dyn visible: `env.interactive and bool(env.incoming_parm_refs or env.outgoing_node_refs)`
+
+        def column "references_layout" {
+            def text "refs_incoming" {
+                label: "Parameters Referencing This Node"
+                bg_visible: false
+                dyn text: `env.incoming_parm_html`
+            }
+            def text "refs_outgoing" {
+                label: "Nodes Referenced by This Node"
+                bg_visible: false
+                dyn text: `env.outgoing_node_html`
+            }
+        }
+    }
+
+    def details "user_data_wrapper" {
+        label: "User Data"
+        open: false
+        dyn visible: `env.interactive`
+
+        def data_key_value "user_data" {
+            model: model {
+                rows: `env.user_data.items()`
+                id: `obj[0]`
+                value: `obj[1]`
+            }
+            key_template: template controls.string {
+                text: `item.id`
+                text_color: ThemeColor.secondary
+                text_align: Qt.AlignRight
+            }
+            value_template: template controls.string {
+                text: `item.value`
+            }
+        }
+    }
+
+    def column "misc_layout" {
+        spacing: 0
+
+        def matrix "misc_matrix_medium" {
+            min_column_width: 100
+            row_height: 32
+            spacing: [10, 5]
+            item_style: "simple"
+
+            def text "geo_memory_full" {
+                dyn label: `'Instanced Memory' if env.geo_memory and env.geo_memory.is_instanced else 'Geometry Memory'`
+                dyn text: `env.geo_memory.full if env.geo_memory else ''`
+            }
+            def text "geo_memory_new" {
+                label: "New Memory"
+                dyn visible: `bool(env.geo_memory and env.geo_memory.new)`
+                dyn text: `env.geo_memory.new if env.geo_memory else ''`
+            }
+            def text "geo_memory_unique" {
+                label: "Unique Memory"
+                dyn visible: `bool(env.geo_memory and env.geo_memory.unique)`
+                dyn text: `env.geo_memory.unique if env.geo_memory else ''`
+            }
+            def number "doop_last_timestep_objects" {
+                label: "Sim Objs Processed"
+                dyn value: $.dop_info.objects_processed_last_timestep
+                dyn visible: `env.category == 'Dop'`
+            }
+            def number "dop_memory_usage" {
+                label: "Sim Memory"
+                dyn value: $.dop_memory_usage
+                dyn visible: `env.category == 'Dop'`
+            }
+            def text "matches_def" {
+                label: "Matches Definition"
+                dyn value: `'Yes' if env.synced else 'No'`
+                dyn text_color: `ThemeColor.green if env.synced else ThemeColor.red`
+            }
+            def text "time_dependent" {
+                label: "Time Dependent"
+                dyn text: `'Yes' if env.time_dependent else 'No'`
+                dyn text_color: `ThemeColor.green if env.time_dependent else ThemeColor.secondary`
+            }
+            def duration "last_cook_time" {
+                label: "Last Cook Time"
+                hms: true
+                fractional_weight: 400
+                auto_decimal_places: 2
+                dyn value: `env.last_cook_time`
+            }
+            def number "total_cooks" {
+                label: "Total Cooks"
+                dyn value: `env.cook_count`
+            }
+        }
+
+        def matrix "misc_matrix_wide" {
+            min_column_width: 200
+            row_height: 32
+            spacing: [10, 5]
+            item_style: "simple"
+
+            def datetime "created" {
+                label: "Created"
+                relative_days: true
+                dyn value: `env.creation_time`
+            }
+            def datetime "modified" {
+                label: "Modified"
+                relative_days: true
+                dyn value: `env.modification_time`
+            }
+        }
+
+        def text "defined_by" {
+            label: "Defined By"
+            style: "simple"
+            text_family: "Source Code Pro"
+            dyn value: `env.defined_by`
+            dyn visible: `bool(env.defined_by)`
+        }
+    }
+
+    def column "comment_layout" {
+        label: "Node Comment"
+        label_visible: false
+        bg_visible: false
+        margin: 0
+        spacing: 5
+
+        def editor "comment_editor" {
+            bg_visible: false
+            label_visible: false
+            margins: 0
+            size_to_content: true
+            placeholder: "Click to edit node comment"
+            on_commit: fn `env.setNodeComment(text)`
+            dyn text: `env.node_comment`
+            dyn visible: `bool(env.interactive or env.node_comment)`
+        }
+        def controls.labeled_switch "comment_switch" {
+            text: "Show Comment in Network"
+            dot_radius: 6
+            text_size: TextSize.small
+            on_state_change: fn `env.setShowCommentInNetwork(checked)`
+            dyn checked: `env.showingCommentInNetwork()`
+            dyn visible: `env.interactive`
+        }
+    }
+}
