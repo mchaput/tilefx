@@ -3,7 +3,7 @@ import enum
 import os.path
 import pathlib
 import weakref
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import (TYPE_CHECKING, cast, Any, Callable, Collection, Iterable,
                     NamedTuple, Optional, Sequence, TypeVar, Union)
 
@@ -1779,9 +1779,12 @@ class DateTimeTile(TextTile):
     def __init__(self, parent: QtWidgets.QGraphicsItem = None):
         super().__init__(parent)
         self._parse_string = "%d %b %Y %I:%M %p"
-        self._html_format = "%I:%M %p<br><small>%d %b %Y</small>"
+        self._time_format = "%I:%M:%S %p"
+        self._date_format = "%d %b %Y"
+        self._text_format = "{time} {date}"
         self._dt = datetime.now()
         self._last_string = ""
+        self._relative_days = False
 
     @settable()
     def setParseString(self, parse_string: str) -> None:
@@ -1789,19 +1792,46 @@ class DateTimeTile(TextTile):
         self._reparse()
 
     @settable()
-    def setFormatString(self, format_string: str) -> None:
-        self._html_format = format_string
+    def setTimeFormatString(self, format_string: str) -> None:
+        self._time_format = format_string
         self._reformat()
+
+    @settable()
+    def setDateFormatString(self, format_string: str) -> None:
+        self._date_format = format_string
+        self._reformat()
+
+    @settable()
+    def setTextFormat(self, format_string: str) -> None:
+        self._text_format = format_string
+        self._reformat()
+
+    @settable("relative_days", argtype=bool)
+    def setUseRelativeDays(self, relative: bool) -> None:
+        self._relative_days = relative
 
     def _reparse(self) -> None:
         self._dt = datetime.strptime(self._last_string, self._parse_string)
         self._reformat()
 
     def _reformat(self) -> None:
-        if self._dt is None:
+        dt = self._dt
+        if dt is None:
             html = ""
         else:
-            html = self._dt.strftime(self._html_format)
+            relative = self._relative_days
+            time_html = dt.strftime(self._time_format)
+            date_html = dt.strftime(self._date_format)
+            if relative:
+                date = dt.date()
+                today = datetime.today().date()
+                yesterday = today - timedelta(days=1)
+                if date == today:
+                    date_html = "Today"
+                elif date == yesterday:
+                    date_html = "Yesterday"
+            html = self._text_format.format(date=date_html, time=time_html,
+                                            dt_obj=dt)
         self.setText(html)
 
     @settable()
@@ -2998,8 +3028,9 @@ class ExpandingTile(Tile):
         if self._content:
             yield self._content
 
-    def toggle(self, *, animated=False) -> None:
+    def toggle(self, *, animated=True) -> None:
         self._content.toggle(animated=animated)
+        self._updateState(animated=animated)
         self.updateGeometry()
 
     def isOpen(self) -> bool:
@@ -3009,9 +3040,10 @@ class ExpandingTile(Tile):
     def setOpen(self, open: bool, animated=False) -> None:
         animated = animated and not self.animationDisabled()
         self._content.setOpen(open, animated=animated)
+        self._updateState(animated=animated)
         self.updateGeometry()
 
-    def _updateState(self, animated=True) -> None:
+    def _updateState(self, animated=False) -> None:
         animated = animated and not self.animationDisabled()
         rot = self._open_rot if self.isOpen() else self._closed_rot
         if animated:
@@ -3031,7 +3063,7 @@ class DetailsTile(ExpandingTile):
     def _makeExpandingItem(self) -> Graphic:
         rollup = containers.RollUpGraphic(self)
         rollup.setOpen(True, animated=False)
-        rollup.openStateChanged.connect(self._updateState)
+        # rollup.openStateChanged.connect(self._updateState)
         return rollup
 
 
@@ -3153,7 +3185,7 @@ class TruncatedTile(ExpandingTile):
     def truncatedItemCount(self) -> int:
         return self._content.truncatedItemCount()
 
-    def _updateState(self, animated=True) -> None:
+    def _updateState(self, animated=False) -> None:
         trunc = self.isTruncated()
         button_opacity = 1.0 if trunc else 0.0
         if animated:
