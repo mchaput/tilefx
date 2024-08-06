@@ -29,34 +29,21 @@ AFTER_KEYWORD = "after"
 INSERT_KEYWORD = "insert"
 
 
-class ErrType(enum.Enum):
-    system = enum.auto()
-    syntax = enum.auto()
-    bracket = enum.auto()
-    string = enum.auto()
-    expr = enum.auto()
-    item = enum.auto()
-    type_name = enum.auto()
-    obj_name = enum.auto()
-    obj_open_brace = enum.auto()
-    obj_member = enum.auto()
-
-
 class ParserError(Exception):
-    def __init__(self, err_type: ErrType, msg: str, text: str, start=-1, end=-1,
+    def __init__(self, msg: str, text: str, start=-1, end=-1,
                  fragment: str = None, token: Token = None):
-        if not isinstance(err_type, ErrType):
-            raise TypeError(err_type)
         if token is not None:
             start = token.start
             end = token.end
-            fragment = text[max(0, start - 5):min(len(text), end + 10)]
+            prefix = text[max(0, start - 10):start]
+            infix = text[start:end]
+            suffix = text[end:min(len(text), end + 10)]
+            fragment = f"{prefix}^{infix}^{suffix}"
 
         err_msg = f"{msg} at {coords(text, start)}"
         if fragment:
             err_msg = f"{err_msg}: {fragment!r}"
         super().__init__(err_msg)
-        self.err_type = err_type
         self.start = start
         self.end = end
 
@@ -175,6 +162,10 @@ class Kind(enum.Enum):
     before = enum.auto()
     after = enum.auto()
     insert = enum.auto()
+
+    for_ = enum.auto()
+    in_ = enum.auto()
+
 
 class Namespace(dict):
     def __repr__(self):
@@ -376,6 +367,16 @@ class Prop(AstNode):
         return self.dyn
 
 
+@dataclasses.dataclass
+class ForEachNode(AstNode):
+    for_source: str
+    in_expr: PythonExpr | PythonBlock | ListNode | DictNode
+    template: ObjectNode
+
+    start: int = dataclasses.field(default=-1, compare=False)
+    end: int = dataclasses.field(default=-1, compare=False)
+
+
 def lex_string_literal(text: str, pos: int, allow_multiline_strings=True
                        ) -> tuple[str, int]:
     multiline = False
@@ -397,16 +398,14 @@ def lex_string_literal(text: str, pos: int, allow_multiline_strings=True
         raise Exception(f"No quote at {pos}")
 
     if multiline and not allow_multiline_strings:
-        raise ParserError(ErrType.bracket, f"Unexprected {close}",
-                          text, pos)
+        raise ParserError(f"Unexprected {close}", text, pos)
 
     prev = pos
     chunks: list[str] = []
     while pos < len(text):
         char = text[pos]
         if char in "\r\n" and not multiline:
-            raise ParserError(ErrType.string, f"Unclosed string",
-                              text, pos)
+            raise ParserError(f"Unclosed string", text, pos)
 
         if text.startswith(close, pos):
             if prev < pos:
@@ -428,12 +427,11 @@ def lex_string_literal(text: str, pos: int, allow_multiline_strings=True
                 pos += 2
                 prev = pos
             else:
-                raise ParserError(ErrType.string,
-                                  f"Unknown escape char {escaped}", text, pos)
+                raise ParserError(f"Unknown escape char {escaped}", text, pos)
         else:
             pos += 1
 
-    raise ParserError(ErrType.string, f"Unclosed string", text, pos)
+    raise ParserError(f"Unclosed string", text, pos)
 
 
 # def lex_quoteless_string(text: str, pos: int) -> tuple[str, int]:
@@ -455,7 +453,7 @@ def lex_expression(text: str, pos: int,
         if char in end_chars and not stack:
             break
         if char in "\r\n" and not stack and newline_is_error:
-            raise ParserError(ErrType.expr,"Unexpected line end", text, pos)
+            raise ParserError("Unexpected line end", text, pos)
 
         if char in brackets:
             # If the char is an open bracket, add it to the stack
@@ -467,7 +465,7 @@ def lex_expression(text: str, pos: int,
             pos += 1
         elif char in endbrackets:
             # If it's a close bracket we're NOT looking for
-            raise ParserError(ErrType.expr, f"Unexpected {char}", text, pos)
+            raise ParserError(f"Unexpected {char}", text, pos)
         elif m := line_comment_expr.match(text, pos):
             pos = m.end()
         elif char in "\"'":
@@ -483,9 +481,9 @@ def lex_expression(text: str, pos: int,
     source = text[start:pos].strip()
     if stack:
         ochar, opos = stack[-1]
-        raise ParserError(ErrType.bracket, f"Unmatched {ochar}", text, opos)
+        raise ParserError(f"Unmatched {ochar}", text, opos)
     if not source:
-        raise ParserError(ErrType.expr, "Empty Python expression", text, start)
+        raise ParserError("Empty Python expression", text, start)
 
     return source, pos
 
@@ -497,13 +495,13 @@ def parse_line_expr(text: str, pos: int) -> tuple[str, int]:
     if end_pos < len(text) and text[end_pos] == "`":
         return expr_str, end_pos + 1
     else:
-        raise ParserError(ErrType.bracket, "Unclosed expr", text, pos)
+        raise ParserError("Unclosed expr", text, pos)
 
 
 def lex_to_end_string(text: str, pos: int, end_str: str) -> tuple[str, int]:
     end_pos = text.find(end_str, pos)
     if end_pos <= pos:
-        raise ParserError(ErrType.bracket, "Unclosed expr", text, pos)
+        raise ParserError("Unclosed expr", text, pos)
     return text[pos:end_pos], end_pos + len(end_str)
 
 
@@ -534,8 +532,10 @@ kw_to_kind: dict[str, Kind] = {
     BEFORE_KEYWORD: Kind.before,
     AFTER_KEYWORD: Kind.after,
     INSERT_KEYWORD: Kind.insert,
+    "for": Kind.for_,
+    "in": Kind.in_,
 }
-kw_expr = re.compile(rf"({'|'.join(kw_to_kind)})\s+(?![:=])")
+kw_expr = re.compile(rf"\b({'|'.join(kw_to_kind)})(\s+|$)(?![:=])")
 
 char_to_kind: dict[str, Kind] = {
     ",": Kind.comma,
@@ -613,8 +613,7 @@ def lex(text: str, pos=0) -> Iterable[Token]:
             if bracket_stack and bracket_stack[-1].kind == Kind.open_brace:
                 bracket_stack.pop()
             else:
-                raise ParserError(ErrType.bracket, "Unmatched }", text,
-                                  token=out)
+                raise ParserError("Unmatched }", text, token=out)
             pos += 1
         elif char == "[":
             out = Token(Kind.open_square, char, pos, pos + 1)
@@ -627,8 +626,7 @@ def lex(text: str, pos=0) -> Iterable[Token]:
             if bracket_stack and bracket_stack[-1].kind == Kind.open_square:
                 bracket_stack.pop()
             else:
-                raise ParserError(ErrType.bracket, "Unmatched ]", text,
-                                  token=out)
+                raise ParserError("Unmatched ]", text, token=out)
             pos += 1
         elif allow_expr:
             expr, end_pos = lex_expression(text, pos, end_chars="\r\n,}")
@@ -645,15 +643,13 @@ def lex(text: str, pos=0) -> Iterable[Token]:
             if bracket_stack and bracket_stack[-1].kind == Kind.open_paren:
                 bracket_stack.pop()
             else:
-                raise ParserError(ErrType.bracket, "Unmatched )", text,
-                                  token=out)
+                raise ParserError("Unmatched )", text, token=out)
             pos += 1
         elif m := name_expr.match(text, pos):
             yield Token(Kind.name, m.group(0), pos, m.end())
             pos = m.end()
         else:
-            raise ParserError(ErrType.syntax, f"Syntax error: {char}",
-                              text, pos)
+            raise ParserError(f"Syntax error: {char}", text, pos)
         allow_expr = False
 
         if pos <= start:
@@ -661,8 +657,7 @@ def lex(text: str, pos=0) -> Iterable[Token]:
 
     if bracket_stack:
         token = bracket_stack[-1]
-        raise ParserError(ErrType.bracket, f"Unclosed {token.payload}",
-                          text, token=token)
+        raise ParserError(f"Unclosed {token.payload}", text, token=token)
 
 
 class Parselet:
@@ -693,8 +688,7 @@ class ListParselet(Parselet):
                 if token.kind == Kind.comma:
                     parser.skip_any(Kind.newline)
                 else:
-                    raise parser.err(ErrType.syntax, "Expected comma after list item",
-                                     token)
+                    raise parser.err("Expected comma after list item", token)
             first = False
 
             if close_token := parser.optional(Kind.close_square):
@@ -702,7 +696,7 @@ class ListParselet(Parselet):
             else:
                 ls.append(parser.expression())
 
-        raise parser.err(ErrType.bracket, "Unclosed square bracket", open_token)
+        raise parser.err("Unclosed square bracket", open_token)
 
 
 def skip_sep(parser: Parser, close_kind: Kind) -> None:
@@ -714,8 +708,7 @@ def skip_sep(parser: Parser, close_kind: Kind) -> None:
         parser.optional(Kind.comma)
         parser.skip_any(Kind.newline)
     else:
-        raise parser.expected(ErrType.syntax, "comma or newline",
-                              parser.current())
+        raise parser.expected("comma or newline", parser.current())
 
 
 def take_key(parser: Parser, op=Kind.colon) -> tuple[str | ComputedKey, int]:
@@ -725,15 +718,15 @@ def take_key(parser: Parser, op=Kind.colon) -> tuple[str | ComputedKey, int]:
     elif key_token.kind == Kind.value_expr:
         key = ComputedKey(key_token.payload)
     else:
-        raise parser.expected(ErrType.item, "dictionary key", key_token)
-    parser.consume(op, ErrType.item)
+        raise parser.expected("dictionary key", key_token)
+    parser.consume(op)
     parser.skip_any(Kind.newline)
     return key, key_token.start
 
 
 def take_object_options(parser: Parser) -> tuple[dict[str, AstNode], int]:
     parser.skip_any(Kind.newline)
-    open_token = parser.consume(Kind.open_paren, ErrType.bracket)
+    open_token = parser.consume(Kind.open_paren)
     parser.skip_any(Kind.newline)
     options: dict[str, AstNode] = {}
     first = True
@@ -750,17 +743,16 @@ def take_object_options(parser: Parser) -> tuple[dict[str, AstNode], int]:
             expr_token = parser.current()
             expr_node = parser.expression()
             if not isinstance(expr_node, (Literal, PythonExpr, JsonpathNode)):
-                raise parser.err(ErrType.syntax, "Invalid option value",
-                                 expr_token)
+                raise parser.err("Invalid option value", expr_token)
             options[key] = expr_node
 
-    raise parser.err(ErrType.bracket, "Unclosed option list", open_token)
+    raise parser.err("Unclosed option list", open_token)
 
 
 def take_object_params(parser: Parser, allowed_types: Sequence[type[AstNode]]
                        ) -> tuple[list[AstNode], int]:
     parser.skip_any(Kind.newline)
-    open_token = parser.consume(Kind.open_brace, ErrType.obj_open_brace)
+    open_token = parser.consume(Kind.open_brace)
     parser.skip_any(Kind.newline)
     items: list[AstNode] = []
     first = True
@@ -775,7 +767,8 @@ def take_object_params(parser: Parser, allowed_types: Sequence[type[AstNode]]
             skip_sep(parser, Kind.close_brace)
         first = False
 
-        cur_kind = parser.current().kind
+        cur_token = parser.current()
+        cur_kind = cur_token.kind
         if cur_kind == Kind.close_brace:
             close_token = parser.consume()
             return items, close_token.end
@@ -785,17 +778,56 @@ def take_object_params(parser: Parser, allowed_types: Sequence[type[AstNode]]
             if expr_node.assumes_name():
                 expr_node.name = key
             items.append(Prop(key, expr_node, start=key_start))
+        elif (ForEachNode in allowed_types) and \
+                (for_token := parser.optional(Kind.for_)):
+            foreach_node = ForEachParselet.parse_prefix(parser, for_token)
+            items.append(foreach_node)
         else:
-            start_token = parser.current()
             obj_node = parser.expression()
             if isinstance(obj_node, Prop) or type(obj_node) in allowed_types:
                 items.append(obj_node)
             else:
-                raise parser.err(ErrType.obj_member,
-                                 f"Can't use {start_token.payload} here",
-                                 start_token)
+                raise parser.err(f"Can't use {cur_token.payload} here",
+                                 cur_token)
 
-    raise parser.err(ErrType.bracket, "Unclosed parameters", open_token)
+    raise parser.err("Unclosed parameters", open_token)
+
+
+def take_tuple(parser: Parser, end_kind: Kind = None,
+               allowed_kinds: Collection[Kind] = (Kind.name,),
+               allow_nesting=True) -> list[Token | list[Token]]:
+    items: list[Token | list[Token]] = []
+    end_kinds = (Kind.eof, end_kind)
+
+    open_token = parser.optional(Kind.open_paren)
+    if open_token:
+        end_kinds += (Kind.close_paren,)
+
+    while parser.current().kind not in end_kinds:
+        token = parser.consume()
+        if token.kind in allowed_kinds:
+            items.append(token)
+        elif allow_nesting and token.kind == Kind.open_paren:
+            items.append(take_tuple(
+                parser, end_kind=end_kind, allowed_kinds=allowed_kinds,
+                allow_nesting=allow_nesting,
+            ))
+            parser.consume(Kind.close_paren)
+        else:
+            raise parser.expected("tuple item", token)
+
+        if parser.optional(Kind.comma):
+            continue
+        else:
+            break
+
+    if open_token:
+        parser.consume(Kind.close_paren)
+
+    if not open_token and not items:
+        raise parser.expected("tuple item", parser.current())
+
+    return items
 
 
 class DictParselet(Parselet):
@@ -815,7 +847,7 @@ class DictParselet(Parselet):
             key, _ = take_key(parser)
             values[key] = parser.expression()
 
-        raise parser.err(ErrType.bracket, "Unclosed brace", open_token)
+        raise parser.err("Unclosed brace", open_token)
 
 
 class ObjectParselet(DictParselet):
@@ -823,7 +855,7 @@ class ObjectParselet(DictParselet):
     def parse_prefix(cls, parser: Parser, kw_token: Token
                      ) -> ObjectNode:
         is_template = kw_token.kind == Kind.template
-        type_token = parser.consume(Kind.name, ErrType.type_name)
+        type_token = parser.consume(Kind.name)
         obj = ObjectNode(type_token.payload, None, is_template=is_template,
                          type_start=type_token.start,
                          start=kw_token.start)
@@ -835,7 +867,7 @@ class ObjectParselet(DictParselet):
             obj.options, _ = take_object_options(parser)
 
         obj.items, obj.end = take_object_params(parser, (
-            ObjectNode, ModelNode, StyleNode, Assign
+            ObjectNode, ModelNode, StyleNode, Assign, ForEachNode,
         ))
         return obj
 
@@ -868,7 +900,7 @@ class InsertionParselet(Parselet):
         next_token = parser.current()
         obj = parser.expression()
         if not isinstance(obj, ObjectNode):
-            raise parser.expected(ErrType.syntax, OBJECT_KEYWORD, next_token)
+            raise parser.expected(OBJECT_KEYWORD, next_token)
         return InsertionNode(kind, arg.payload, obj, start=kw_token.start,
                              end=obj.end)
 
@@ -938,7 +970,7 @@ class AssignParselet(Parselet):
     def parse_prefix(cls, parser: Parser, kw_token: Token) -> Assign:
         name_token = parser.consume(Kind.name)
         name = name_token.payload
-        parser.consume(Kind.assign_eq, ErrType.item)
+        parser.consume(Kind.assign_eq)
         parser.skip_any(Kind.newline)
 
         first_expr_token = parser.current()
@@ -950,8 +982,7 @@ class AssignParselet(Parselet):
             return Assign(name, expr_node, dyn=dynamic,
                           start=kw_token.start, end=expr_node.end)
         else:
-            raise parser.expected(ErrType.syntax, "assignment value",
-                                  first_expr_token)
+            raise parser.expected("assignment value", first_expr_token)
 
 
 class DynParselet(Parselet):
@@ -959,7 +990,7 @@ class DynParselet(Parselet):
     def parse_prefix(cls, parser: Parser, kw_token: Token) -> Prop:
         name_token = parser.consume(Kind.name)
         name = name_token.payload
-        parser.consume(Kind.colon, ErrType.item)
+        parser.consume(Kind.colon)
         parser.skip_any(Kind.newline)
 
         first_expr_token = parser.current()
@@ -970,8 +1001,7 @@ class DynParselet(Parselet):
             return Prop(name, expr_node, dyn=True, start=kw_token.start,
                         end=expr_node.end)
         else:
-            raise parser.expected(ErrType.syntax, "property expression",
-                                  first_expr_token)
+            raise parser.expected("property expression", first_expr_token)
 
 
 class FuncParselet(Parselet):
@@ -982,8 +1012,7 @@ class FuncParselet(Parselet):
             ex_node = ExprParselet.parse_prefix(parser, ex_token)
             return FuncNode(ex_node, start=kw_token.start, end=ex_node.end)
         else:
-            raise parser.expected(ErrType.syntax, "Python block",
-                                  ex_token)
+            raise parser.expected("Python block", ex_token)
 
 
 class RefParselet(Parselet):
@@ -995,6 +1024,37 @@ class RefParselet(Parselet):
             Assign, ObjectNode,
         ))
         return obj
+
+
+class ForEachParselet(Parselet):
+    @staticmethod
+    def flatten_names(tokens: list[Token | list[Token]]) -> str:
+        out = []
+        for t in tokens:
+            if isinstance(t, list):
+                out.append(ForEachParselet.flatten_names(t))
+            else:
+                out.append(t.payload)
+        return f"({', '.join(out)})"
+
+    @classmethod
+    def parse_prefix(cls, parser: Parser, for_token: Token) -> ForEachNode:
+        names = take_tuple(parser, end_kind=Kind.in_)
+        for_source = cls.flatten_names(names)
+
+        parser.consume(Kind.in_)
+        in_token = parser.current()
+        in_expr = parser.expression()
+        if not isinstance(in_expr, (PythonExpr, PythonBlock, ListNode)):
+            raise parser.expected("python expression or list", in_token)
+
+        obj_token = parser.current()
+        obj_expr = parser.expression()
+        if not isinstance(obj_expr, ObjectNode):
+            raise parser.expected("object definition", obj_token)
+        obj_expr.is_template = True
+
+        return ForEachNode(for_source, in_expr, obj_expr)
 
 
 prefixes: dict[Kind, Parselet] = {
@@ -1033,17 +1093,14 @@ class Parser:
         self.tokens = list(lex(text))
         # self.depth = 0
 
-    def expected(self, err_type: ErrType, expected: str, found: Token
-                 ) -> Exception:
-        return self.err(err_type, f"Expected {expected}, "
-                        f"found {found.kind}({found.payload!r})",
-                        found)
+    def expected(self, expected: str, found: Token) -> Exception:
+        return self.err(f"Expected {expected}, "
+                        f"found {found.kind}({found.payload!r})", found)
 
-    def err(self, err_type: ErrType, message: str, token: Token = None
-            ) -> Exception:
+    def err(self, message: str, token: Token = None) -> Exception:
         if token is None:
             token = self.current()
-        return ParserError(err_type, message, self.text, token=token)
+        return ParserError(message, self.text, token=token)
 
     def optional(self, kind: Kind) -> Optional[Token]:
         if not self.tokens:
@@ -1061,14 +1118,14 @@ class Parser:
     def _eof_token(self) -> Token:
         return Token(Kind.eof, "<EOF>", len(self.text), len(self.text))
 
-    def consume(self, kind: Kind = None, err_type=ErrType.syntax) -> Token:
+    def consume(self, kind: Kind = None) -> Token:
         if self.tokens:
             token = self.tokens.pop(0)
         else:
             token = self._eof_token()
 
         if kind and token.kind != kind:
-            raise self.expected(err_type, str(kind.name), token)
+            raise self.expected(str(kind.name), token)
         return token
 
     def current(self) -> Token:
@@ -1094,7 +1151,7 @@ class Parser:
         token = self.consume()
         prefix_parselet = prefixes.get(token.kind)
         if not prefix_parselet:
-            raise Exception(f"No parser for {token.kind}")
+            raise self.err("Invalid syntax", token)
 
         # self.depth += 1
         expr = prefix_parselet.parse_prefix(self, token)
@@ -1121,7 +1178,7 @@ class Parser:
         node = self.parse_module()
         if self.tokens:
             tk = self.tokens[0]
-            raise self.err(ErrType.syntax, f"Syntax error: {tk.payload}", tk)
+            raise self.err(f"Syntax error: {tk.payload}", tk)
 
         if len(node.items) == 1:
             return node.items[0]

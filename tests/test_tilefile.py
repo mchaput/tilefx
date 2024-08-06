@@ -763,6 +763,199 @@ def test_parse_callback():
     ])
 
 
+def test_take_tuple_aingle_nobrackets():
+    assert tf.take_tuple(tf.Parser("foo")) == [
+        tf.Token(tf.Kind.name, "foo", 0, 3)
+    ]
+
+
+def test_take_tuple_pair_nobrackets():
+    assert tf.take_tuple(tf.Parser("foo, bar")) == [
+        tf.Token(tf.Kind.name, "foo", 0, 3),
+        tf.Token(tf.Kind.name, "bar", 5, 8)
+    ]
+
+
+def test_take_tuple_single_brackets():
+    assert tf.take_tuple(tf.Parser("(foo)")) == [
+        tf.Token(tf.Kind.name, "foo", 1, 4)
+    ]
+
+
+def test_take_tuple_pair_brackets():
+    assert tf.take_tuple(tf.Parser("(foo, bar)")) == [
+        tf.Token(tf.Kind.name, "foo", 1, 4),
+        tf.Token(tf.Kind.name, "bar", 6, 9),
+    ]
+
+
+def test_take_tuple_trailing_comma_nobrackets():
+    assert tf.take_tuple(tf.Parser("foo, bar,")) == [
+        tf.Token(tf.Kind.name, "foo", 0, 3),
+        tf.Token(tf.Kind.name, "bar", 5, 8)
+    ]
+
+
+def test_take_tuple_trailing_comma_brackets():
+    assert tf.take_tuple(tf.Parser("(foo, bar, )")) == [
+        tf.Token(tf.Kind.name, "foo", 1, 4),
+        tf.Token(tf.Kind.name, "bar", 6, 9),
+    ]
+
+
+def test_take_tuple_required_end():
+    assert tf.take_tuple(tf.Parser("foo, bar in")) == [
+        tf.Token(tf.Kind.name, "foo", 0, 3),
+        tf.Token(tf.Kind.name, "bar", 5, 8)
+    ]
+
+
+def test_take_tuple_empty_nobrackets():
+    with pytest.raises(tf.ParserError):
+        tf.take_tuple(tf.Parser(""))
+
+    with pytest.raises(tf.ParserError):
+        tf.take_tuple(tf.Parser("in"))
+
+
+def test_take_tuple_empty_brackets():
+    assert tf.take_tuple(tf.Parser("() in"), end_kind=tf.Kind.in_) == []
+
+
+def test_take_tuple_nested_nobrackets():
+    assert tf.take_tuple(tf.Parser("foo, (bar, baz)")) == [
+        tf.Token(tf.Kind.name, "foo", 0, 3),
+        [
+            tf.Token(tf.Kind.name, "bar", 6, 9),
+            tf.Token(tf.Kind.name, "baz", 11, 14),
+        ]
+    ]
+
+    assert tf.take_tuple(tf.Parser("foo, (bar, baz), qux")) == [
+        tf.Token(tf.Kind.name, "foo", 0, 3),
+        [
+            tf.Token(tf.Kind.name, "bar", 6, 9),
+            tf.Token(tf.Kind.name, "baz", 11, 14),
+        ],
+        tf.Token(tf.Kind.name, "qux", 17, 20),
+    ]
+
+
+def test_take_tuple_nested_brackets():
+    assert tf.take_tuple(tf.Parser("(foo, (bar, baz))")) == [
+        tf.Token(tf.Kind.name, "foo", 1, 4),
+        [
+            tf.Token(tf.Kind.name, "bar", 7, 10),
+            tf.Token(tf.Kind.name, "baz", 12, 15),
+        ]
+    ]
+
+    assert tf.take_tuple(tf.Parser("(foo, (bar, baz), qux)")) == [
+        tf.Token(tf.Kind.name, "foo", 1, 4),
+        [
+            tf.Token(tf.Kind.name, "bar", 7, 10),
+            tf.Token(tf.Kind.name, "baz", 12, 15),
+        ],
+        tf.Token(tf.Kind.name, "qux", 18, 21),
+    ]
+
+
+def test_for_each_name():
+    p = tf.parse("""
+    def a {
+        for b in c def e {
+            x: 10
+            label: b
+        }
+    }
+    """)
+    assert p == tf.ObjectNode("a", None, [
+        tf.ForEachNode("(b)", tf.PythonExpr("c"), tf.ObjectNode("e", None, [
+            tf.Prop("x", tf.Literal(10)),
+            tf.Prop("label", tf.PythonExpr("b")),
+        ], is_template=True))
+    ])
+
+
+def test_for_each_multi():
+    p = tf.parse("""
+    def a {
+        for q, r in c def e {
+            x: 10
+            label: b
+        }
+    }
+    """)
+    assert p == tf.ObjectNode("a", None, [
+        tf.ForEachNode("(q, r)", tf.PythonExpr("c"), tf.ObjectNode("e", None, [
+            tf.Prop("x", tf.Literal(10)),
+            tf.Prop("label", tf.PythonExpr("b")),
+        ], is_template=True))
+    ])
+
+
+def test_for_each_dotted_name():
+    p = tf.parse("""
+    def a {
+        for b in c.q.r def e {
+            x: 10
+            label: b
+        }
+    }
+    """)
+    assert p == tf.ObjectNode("a", None, [
+        tf.ForEachNode("(b)", tf.PythonExpr("c.q.r"), tf.ObjectNode("e", None, [
+            tf.Prop("x", tf.Literal(10)),
+            tf.Prop("label", tf.PythonExpr("b")),
+        ], is_template=True))
+    ])
+
+
+def test_for_each_expr():
+    p = tf.parse("""
+    def a {
+        for b in `c.items()` def e {
+            x: 10
+            label: b
+        }
+    }
+    """)
+    assert p == tf.ObjectNode("a", None, [
+        tf.ForEachNode(
+            "(b)", tf.PythonExpr("c.items()"),
+            tf.ObjectNode("e", None, [
+                tf.Prop("x", tf.Literal(10)),
+                tf.Prop("label", tf.PythonExpr("b")),
+            ], is_template=True)
+        )
+    ])
+
+
+def test_for_each_list():
+    p = tf.parse("""
+        def a {
+            q: 50
+            r: 100
+            for b in ["aaa", "bbb"] def e {
+                x: 10
+                label: b
+            }
+        }
+        """)
+    assert p == tf.ObjectNode("a", None, [
+        tf.Prop("q", tf.Literal(50)),
+        tf.Prop("r", tf.Literal(100)),
+        tf.ForEachNode(
+            "(b)",
+            tf.ListNode([tf.Literal("aaa"), tf.Literal("bbb")]),
+            tf.ObjectNode("e", None, [
+                tf.Prop("x", tf.Literal(10)),
+                tf.Prop("label", tf.PythonExpr("b")),
+            ], is_template=True)
+        )
+    ])
+
+
 def test_parse_object_insertion():
     p = tf.parse("""
     over "root" {
